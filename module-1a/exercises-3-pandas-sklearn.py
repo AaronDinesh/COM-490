@@ -124,14 +124,14 @@ data.head()
 
 data_path = './data/promoter_sequences.csv'
 
-seq_df = ###TODO###(data_path, names=['promoter', 'name', 'sequence'])
+seq_df = pd.read_csv(data_path, names=["promoter", "name", "sequence"])
 seq_df
 
 # ### 2.2: Clean the data
 #
 # The DNA sequences contain unwanted (tabs `\t`) characters, use [pandas string methods](https://pandas.pydata.org/pandas-docs/stable/reference/series.html#string-handling) on the column to address the problem.
 
-seq_df['sequence'] = seq_df['sequence'].###TODO###
+seq_df['sequence'] = seq_df['sequence'].replace("\t", "")
 
 # ### 2.3: Extract features
 #
@@ -190,7 +190,7 @@ freqs = np.vstack(seq_df.sequence.apply(lambda x: get_all_kmer_freqs(x, k=k)))
 features = pd.concat(
     [
         seq_df[['name', 'sequence']],
-        pd.DataFrame(freqs, columns=###TODO###)
+        pd.DataFrame(freqs, columns=get_kmers_vocab(4))
     ],
     axis=1,
 )
@@ -216,7 +216,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
 X_train, X_test, y_train, y_test = train_test_split(X, y)
-clf.fit(###TODO###)
+clf.fit(X_train, y_train)
 accuracy_score(y_test, clf.predict(X_test))
 # -
 
@@ -232,7 +232,7 @@ accuracy_score(y_test, clf.predict(X_test))
 # Solution
 from sklearn.model_selection import LeaveOneOut
 from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score
-cv = ###TODO###().split(X)
+cv = LeaveOneOut().split(X)
 preds = np.zeros(y.shape, dtype=str)
 for train_idx, test_idx in cv:
     clf.fit(X[train_idx, :], y[train_idx])
@@ -252,7 +252,7 @@ plt.title(f"LOO cross validation accuracy: {accuracy_score(y, preds):.2f}")
 
 plt.figure(figsize=(10, 10))
 # Refit on whole dataset
-clf.fit(###TODO###)
+clf.fit(X_train, y_train)
 imp_idx = np.argsort(clf.feature_importances_)
 plt.barh(features.columns[2:][imp_idx][-10:], clf.feature_importances_[imp_idx][-10:])
 
@@ -296,9 +296,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 n_components=3
 pca = PCA(n_components=n_components)
-pcs = pca.###TODO###(X)
+pcs = pca.fit_transform(X)
 sns.pairplot(pd.DataFrame(pcs[:, :n_components]).assign(prom=y), hue='prom')
-
+plt.show()
 
 # Use K-means clustering to identify 2 clusters what proportion of points are correctly assigned (note that KMeans may inverse the labels/colors)?
 # Compare visually, is it a good approach?
@@ -308,6 +308,6 @@ from sklearn.cluster import KMeans
 km = KMeans(2)
 km.fit(X)
 pred = km.predict(X)
-sns.pairplot(pd.DataFrame(pcs[:, :n_components]).assign(prom=###TODO###), hue='prom')
-
+sns.pairplot(pd.DataFrame(pcs[:, :n_components]).assign(prom=pred), hue='prom')
+plt.show()
 
