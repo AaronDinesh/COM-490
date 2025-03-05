@@ -26,7 +26,7 @@
 # - Let us know if you need us to install additional python packages.
 
 # %%
-GROUP_NAME='##TODO
+GROUP_NAME='X1'
 
 # %% [markdown]
 # ## Carbosense
