@@ -65,15 +65,18 @@ wget -c -O ./module-2a.zip https://drive.switch.ch/index.php/s/BwScS245DivdabW/d
 unzip -n module-2a.zip
 
 # TODO: find and show content of your HDFS home folder
-hdfs dfs TODO-FIND-YOUR-HOME-FOLDER
+hdfs dfs -ls
 
-hdfs dfs TODO-CREATE-FOLDER-WEEK3
+hdfs dfs -mkdir week3
+hdfs dfs -mkdir week3/sbb
+hdfs dfs -mkdir week3/sbb/istdaten
 
-hdfs dfs TODO-MOVE-DATA-TO-FOLDER-WEEK3
+hdfs dfs -moveFromLocal ./2025-03-02_istdaten.parquet week3 
+hdfs dfs -moveFromLocal ./2025-03-03_istdaten.parquet week3
 
-hdfs dfs TODO-SHOW-CONTENT-OF-FOLDER-WEEK3
+hdfs dfs -ls week3
 
-hdfs dfs TODO-CHANGE-PERMISSIONS-
+hdfs dfs -chmod 0700 .
 
 
 
@@ -100,9 +103,9 @@ hdfs dfs -ls /data/com-490/
 # - Exactly the same information is encoded in each folder.
 # - The two values show the size of the information without data replication and the actual size on disk with replication (x 3)
 
-hdfs dfs TODO-CMD-TO-PRINT-CONTENT-SIZE /data/com-490/csv/sbb/istdaten/
+hdfs dfs -du -h /data/com-490/csv/sbb/istdaten/
 
-hdfs dfs TODO-CMD-TO-PRINT-CONTENT-SIZE /data/com-490/iceberg/sbb/istdaten/
+hdfs dfs -du -h /data/com-490/iceberg/sbb/istdaten/
 
 
 
@@ -118,10 +121,8 @@ hdfs dfs TODO-CMD-TO-PRINT-CONTENT-SIZE /data/com-490/iceberg/sbb/istdaten/
 #
 # But not until you have completed all the exercises from the other notebook.
 
-# +
-#hdfs dfs -rm -r -skipTrash /user/${USER-error}/week3
-#rm module-2a.zip
-#rm *.parquet
-# -
+hdfs dfs -rm -r -skipTrash /user/${USER-error}/week3
+rm module-2a.zip
+rm *.parquet
 
 
