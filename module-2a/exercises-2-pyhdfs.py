@@ -49,8 +49,8 @@ sbb_istdaten=f'{hadoop_fs}/user/{username}/week3/sbb/istdaten/year=2025/month=03
 print(f'Read from {sbb_istdaten}')
 pd.read_parquet(sbb_istdaten)
 
-#df=pd.read_parquet(sbb_istdaten)
-#print(f'Memory usage: {df.memory_usage(deep=True).sum()} bytes')
+# df=pd.read_parquet(sbb_istdaten)
+# print(f'Memory usage: {df.memory_usage(deep=True).sum()} bytes')
 # -
 
 # ---
@@ -125,5 +125,33 @@ fsspec.available_protocols()
 # **Q1**: Use the knowledge you've gained above, and refer to the PyArrow documentation for creating folders, as you did in Exercise 1. 
 #
 # However, note that you will not be able to change the permissions."
+
+# +
+from pyarrow.fs import HadoopFileSystem
+from pyarrow.fs import LocalFileSystem
+from pyarrow.fs import FileType
+import fsspec
+import os
+
+
+hadoop_link = os.environ.get('HADOOP_FS')
+username = os.environ.get('USER')
+hdfs = fsspec.filesystem('hdfs', url=hadoop_link)
+hdfs.ls(f'/user/{username}/')
+
+local_fs = fsspec.filesystem('file')
+parquet_files = local_fs.glob(f'/home/{username}/COM-490/module-2a/*.parquet')
+filenames = [x[x.rfind('/')+1:] for x in parquet_files]
+print(filenames)
+for fname in filenames:
+    year, month, day = fname.split("-")
+    #need to remove the trailing chars from day
+    day = day[:2]
+    fpath = f"/user/{username}/week3/sbb/istdaten/year={year}/month={month}/day={day}/{fname}"
+    if hdfs.get_file_info(fpath).type == FileType.NotFound:
+        print(f"File {fname} not found on HDFS. Adding file now")
+        hdfs.
+
+# -
 
 

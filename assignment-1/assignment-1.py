@@ -101,8 +101,6 @@ plt.rcParams['font.family'] = 'DejaVu Sans' # prevent font not found warnings
 # %%
 DATA_DIR='~/shared/data/'
 
-# %%
-
 # %% [markdown]
 # ### a) **10/10**
 #
@@ -145,6 +143,11 @@ DATA_DIR='~/shared/data/'
 # https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.append.html
 
 # %%
+#First we need to load the raw dataframe
+#Use pandas.Dataframe.interpolate to perform a linear interpolation of missing values
+#Then determine the measurement period and figure out the window size. We can use pandas.Dataframe.rolling
+# to creating a sliding window over our code. This will have to be placed in a new dataframe
+
 
 # %% [markdown]
 # ## PART II: Data visualization (15 points)

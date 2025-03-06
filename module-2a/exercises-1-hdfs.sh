@@ -67,19 +67,15 @@ unzip -n module-2a.zip
 # TODO: find and show content of your HDFS home folder
 hdfs dfs -ls
 
-hdfs dfs -mkdir week3
-hdfs dfs -mkdir week3/sbb
-hdfs dfs -mkdir week3/sbb/istdaten
+hdfs dfs -mkdir -p week3/sbb/istdaten/year=2025/month=03/day=03
+hdfs dfs -mkdir -p week3/sbb/istdaten/year=2025/month=03/day=02
 
-hdfs dfs -moveFromLocal ./2025-03-02_istdaten.parquet week3 
-hdfs dfs -moveFromLocal ./2025-03-03_istdaten.parquet week3
+hdfs dfs -mv week3/2025-03-02_istdaten.parquet week3/sbb/istdaten/year=2025/month=03/day=02
+hdfs dfs -mv week3/2025-03-03_istdaten.parquet week3/sbb/istdaten/year=2025/month=03/day=03
 
 hdfs dfs -ls week3
 
 hdfs dfs -chmod 0700 .
-
-
-
 
 # ----
 # ### Exploring HDFS
@@ -90,13 +86,6 @@ hdfs dfs -chmod 0700 .
 
 hdfs dfs -ls /data/com-490/
 
-
-
-
-
-
-
-
 # **Q3:** Use the `hdfs dfs -du` command to print a human readable summary of the total HDFS size footprint of the SBB istdaten data under `/data/com-490/csv/sbb/istdaten/` and the same data stored in parquet format under `/data/com-490/iceberg/sbb/istdaten/`
 #
 # Note:
@@ -106,8 +95,6 @@ hdfs dfs -ls /data/com-490/
 hdfs dfs -du -h /data/com-490/csv/sbb/istdaten/
 
 hdfs dfs -du -h /data/com-490/iceberg/sbb/istdaten/
-
-
 
 # ----------
 # **That's all folks!**
