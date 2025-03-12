@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     custom_cell_magics: kql
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.6
+#       jupytext_version: 1.11.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -636,7 +637,8 @@ end_date   = "2017-10-25"
 df_drift = merged_df_clustered.loc[start_date:end_date].copy()
 
 # Select sensors of interest 'ZSBN', and pick a few others (like 'ZGHD', 'ZORL') for comparison
-sensors_of_interest = ["ZSBN", "ZGHD", "ZORL"]
+#ZHRO is geographically close. BUDF has a similar mean CO2 level to ZSBN
+sensors_of_interest = ["ZSBN", "ZHRO", "BUDF" , "ZORL"]
 df_drift = df_drift[df_drift["LocationName"].isin(sensors_of_interest)]
 
 # Make an interactive line plot of CO2 for these sensors
@@ -673,24 +675,59 @@ fig.show()
 
 # %%
 #Extract the ZSBN data
-print(merged_df_clustered)
 
-ZSBNDataMask = merged_df_clustered['LocationName'] == "ZSBN"
-ZSBNData = merged_df_clustered[ZSBNDataMask].to_numpy()
+start_date = pd.Timestamp("2017-10-23 00:00:00")
+end_date   = pd.Timestamp("2017-10-25 00:00:00") 
+alternateLocationOfInterest = "BUDF"
+
+endDateTimeForBadData = pd.Timestamp("2017-10-23 23:00:00")
+
+ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <= @endDateTimeForBadData and timestamp >= @start_date")
+ZSBNGoodData = ZSBNGoodData.to_numpy()
+
+ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp > @endDateTimeForBadData and timestamp <= @end_date")
+ZSBNBadData = ZSBNBadData.to_numpy()
+
+timestamps = pd.date_range(start=start_date, end=end_date, freq='30T')
 
 #Extract the temp and humidty features
-features = ZSBNData[:, 3:5]
-targets = ZSBNData[:, 2]
+features = ZSBNGoodData[:, 3:5]
+targets = ZSBNGoodData[:, 2]
 
 model = sklearn.linear_model.LinearRegression()
 model.fit(features, targets)
 print("The model coefficients are: ", model.coef_)
 print("The R\u00B2 score is: ", model.score(features, targets))
+regressedTargets = model.predict(ZSBNBadData[:, 3:5])
 
-#Generting the plotly plot of measured and fit CO2 Data.
+correctedCO2Values = np.append(targets, regressedTargets)
+
+alternateCO2Site = merged_df_clustered.query(f"LocationName == '{alternateLocationOfInterest}' and timestamp >= @start_date and timestamp <= @end_date").to_numpy()[:, 2]
+
+fig = go.Figure()
+
+lineplot1 = go.Scatter(x=timestamps, y=correctedCO2Values, mode='lines', name='Corrected ZSBN CO2 Values')
+lineplot2 = go.Scatter(x=timestamps, y=alternateCO2Site, mode="lines", name=f'{alternateLocationOfInterest} CO2 Values')
+lineplotOriginal = go.Scatter(x=timestamps, y=np.append(targets, ZSBNBadData[:, 2]), line=dict(dash='dash'), name='Original ZSBN CO2 Values')
 
 
-
+fig.add_trace(lineplot1)
+fig.add_trace(lineplot2)
+fig.add_trace(lineplotOriginal)
+fig.update_layout(template='plotly_dark',
+                  title=dict(text="Correcting Sensor Drift in ZSBN"),
+                  xaxis=dict(
+                    title=dict(
+                        text="Timestamp"
+                    )
+                  ),
+                  yaxis=dict(
+                    title=dict(
+                        text="CO2 [ppm]"
+                    )
+                  )
+                 )
+fig.show()
 
 # %% [markdown]
 # ### c) **10/35**
