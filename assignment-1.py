@@ -454,7 +454,7 @@ print(f"\nOptimal number of clusters: {optimal_k}\nDistortion score: {distortion
 # A **lower distortion score** means points lie **closer to their centroid**, reflecting **more compact clusters**. While the **lowest** distortion occurs when each point is its own cluster, that choice would be **overly complex**. So a good trade-off aims to reduce distortion and complexity (low k).
 
 # %% [markdown]
-# ### Perfomr K-Means with optimal k value and add the altitude cluster indexes to the DataFrame with all measurments
+# ### Perform K-Means with optimal k value and add the altitude cluster indexes to the DataFrame with all measurments
 
 # %%
 # Fit K-Means on sensor_df_clean
@@ -656,7 +656,7 @@ fig.update_layout(
 )
 fig.show()
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ### b) **10/35**
 #
 # The domain experts ask you if you could reconstruct the CO2 concentration of the drifting sensor had the drift not happened. You decide to:
@@ -672,8 +672,27 @@ fig.show()
 # ![ts_cv](https://player.slideplayer.com/86/14062041/slides/slide_28.jpg)
 
 # %%
+#Extract the ZSBN data
+print(merged_df_clustered)
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+ZSBNDataMask = merged_df_clustered['LocationName'] == "ZSBN"
+ZSBNData = merged_df_clustered[ZSBNDataMask].to_numpy()
+
+#Extract the temp and humidty features
+features = ZSBNData[:, 3:5]
+targets = ZSBNData[:, 2]
+
+model = sklearn.linear_model.LinearRegression()
+model.fit(features, targets)
+print("The model coefficients are: ", model.coef_)
+print("The R\u00B2 score is: ", model.score(features, targets))
+
+#Generting the plotly plot of measured and fit CO2 Data.
+
+
+
+
+# %% [markdown]
 # ### c) **10/35**
 #
 # In your next attempt to solve the problem, you decide to exploit the fact that the CO2 concentrations, as measured by the sensors __experiencing similar conditions__, are expected to be similar.
@@ -690,7 +709,7 @@ fig.show()
 
 # %%
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ### d) **10/35**
 #
 # Now, instead of feeding the model with all features, you want to do something smarter by using linear regression with fewer features.
