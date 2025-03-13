@@ -669,6 +669,10 @@ fig.show()
 #     - the __95% confidence interval__ obtained from cross validation: assume that the prediction error follows a normal distribution and is independent of time.
 # - What do you observe? Report your findings.
 #
+# ### Answer
+# I notice that the linear regression model acurately captures the periodic nature of the CO2 levels and also corrects for the sensor drift that is observed. However it seems to be too smooth and cant accuratly capture the "spiky-ness" in the CO2 measurements. I think this can be corrected by the introduction of some periodic non-linear high frequency features.
+#
+#
 # __Note:__ Cross validation on time series is different from that on other kinds of datasets. The following diagram illustrates the series of training sets (in orange) and validation sets (in blue). For more on time series cross validation, there are a lot of interesting articles available online. scikit-learn provides a nice method [`sklearn.model_selection.TimeSeriesSplit`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html).
 #
 # ![ts_cv](https://player.slideplayer.com/86/14062041/slides/slide_28.jpg)
@@ -676,14 +680,15 @@ fig.show()
 # %%
 #Extract the ZSBN data
 
-start_date = pd.Timestamp("2017-10-23 00:00:00")
+start_date = pd.Timestamp("2017-10-01 00:00:00")
 end_date   = pd.Timestamp("2017-10-25 00:00:00") 
 alternateLocationOfInterest = "BUDF"
 
 endDateTimeForBadData = pd.Timestamp("2017-10-23 23:00:00")
 
-ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <= @endDateTimeForBadData and timestamp >= @start_date")
+ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <= @endDateTimeForBadData")
 ZSBNGoodData = ZSBNGoodData.to_numpy()
+
 
 ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp > @endDateTimeForBadData and timestamp <= @end_date")
 ZSBNBadData = ZSBNBadData.to_numpy()
@@ -692,41 +697,62 @@ timestamps = pd.date_range(start=start_date, end=end_date, freq='30T')
 
 #Extract the temp and humidty features
 features = ZSBNGoodData[:, 3:5]
+
 targets = ZSBNGoodData[:, 2]
 
-model = sklearn.linear_model.LinearRegression()
-model.fit(features, targets)
-print("The model coefficients are: ", model.coef_)
-print("The R\u00B2 score is: ", model.score(features, targets))
+bestScore = 0
+bestModel = None
+bestMSE = np.inf
+residuals = []
+
+for i, (trainIdx, testIdx) in enumerate(sklearn.model_selection.TimeSeriesSplit(n_splits=5).split(features)):
+    model = sklearn.linear_model.LinearRegression()
+    model.fit(features[trainIdx], targets[trainIdx])    
+    yPred = model.predict(features[testIdx])
+
+    residuals.extend(targets[testIdx] - yPred)
+
+    #Calculate MSE between the predicted and actual values
+    mse = sklearn.metrics.mean_squared_error(targets[testIdx], yPred)
+    score = model.score(features[testIdx], targets[testIdx])
+    #Save the model with the lowest MSE
+    if mse < bestMSE:
+        bestMSE = mse
+        bestScore = score
+        bestModel = model
+
+residualsMean = np.mean(residuals)
+residualsStd = np.std(residuals, ddof=1)
+
+#Print the best score and coefficients
+print(f"Best R\u00B2: {bestScore:.4f}")
+print(f"Best model coefficients: {bestModel.coef_}")
+print(f"Best MSE: {bestMSE:.4f}")
+print(f"Mean of Residuals: {residualsMean}")
+print(f"StDev of Residuals: {residualsStd}")
+
+confidenceWidth = 1.96 * residualsStd / np.sqrt(len(features))
+
+fullOctoberMonthData = merged_df_clustered.query(f"LocationName == 'ZSBN' and timestamp <= @end_date").to_numpy()
 regressedTargets = model.predict(ZSBNBadData[:, 3:5])
+regressedTargets = np.append(targets, regressedTargets)	
 
-correctedCO2Values = np.append(targets, regressedTargets)
+upperConfidenceInterval = regressedTargets + confidenceWidth
+lowerConfidenceInterval = regressedTargets - confidenceWidth
 
-alternateCO2Site = merged_df_clustered.query(f"LocationName == '{alternateLocationOfInterest}' and timestamp >= @start_date and timestamp <= @end_date").to_numpy()[:, 2]
 
 fig = go.Figure()
 
-lineplot1 = go.Scatter(x=timestamps, y=correctedCO2Values, mode='lines', name='Corrected ZSBN CO2 Values')
-lineplot2 = go.Scatter(x=timestamps, y=alternateCO2Site, mode="lines", name=f'{alternateLocationOfInterest} CO2 Values')
-lineplotOriginal = go.Scatter(x=timestamps, y=np.append(targets, ZSBNBadData[:, 2]), line=dict(dash='dash'), name='Original ZSBN CO2 Values')
+lineplot1 = go.Scatter(x=timestamps, y=regressedTargets, mode='lines', name='Corrected ZSBN CO2 Values')
+lineplotOriginal = go.Scatter(x=timestamps, y=fullOctoberMonthData[:, 2], line=dict(dash='dash'), name='Original ZSBN CO2 Values')
+confidenceRegion = go.Scatter(x=np.concatenate([timestamps, timestamps[::-1]]), y=np.concatenate([upperConfidenceInterval, lowerConfidenceInterval[::-1]]), fill='toself', fillcolor='rgba(255, 189, 139, 0.65)', line=dict(color='rgba(255, 189, 139, 0)'), name='95% Confidence Interval')
 
 
 fig.add_trace(lineplot1)
-fig.add_trace(lineplot2)
 fig.add_trace(lineplotOriginal)
-fig.update_layout(template='plotly_dark',
-                  title=dict(text="Correcting Sensor Drift in ZSBN"),
-                  xaxis=dict(
-                    title=dict(
-                        text="Timestamp"
-                    )
-                  ),
-                  yaxis=dict(
-                    title=dict(
-                        text="CO2 [ppm]"
-                    )
-                  )
-                 )
+fig.add_trace(confidenceRegion)
+
+fig.update_layout(template='plotly_dark',title=dict(text="Correcting Sensor Drift in ZSBN (October 2017)"),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")))
 fig.show()
 
 # %% [markdown]
