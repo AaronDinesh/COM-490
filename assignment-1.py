@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
@@ -658,6 +659,7 @@ fig.update_layout(
 )
 fig.show()
 
+
 # %% [markdown]
 # ### b) **10/35**
 #
@@ -678,11 +680,25 @@ fig.show()
 # ![ts_cv](https://player.slideplayer.com/86/14062041/slides/slide_28.jpg)
 
 # %%
+def additionalFeature(timestamp):
+    sineTimeFeature = np.sin(2 * np.pi * timestamp.hour / 24)
+    cosineTimeFeature = np.cos(2 * np.pi * timestamp.hour / 24)
+    doubleSineTimeFeature = np.sin(4 * np.pi * timestamp.hour / 24)
+    doubleCosineTimeFeature = np.cos(4 * np.pi * timestamp.hour / 24)
+
+    return (sineTimeFeature, cosineTimeFeature, doubleSineTimeFeature, doubleCosineTimeFeature)
+
+def augmentData(features, timestamp):
+    sineTimeFeature, cosineTimeFeature, doubleSineTimeFeature, doubleCosineTimeFeature = additionalFeature(timestamp)
+
+    features = np.column_stack((features, sineTimeFeature, cosineTimeFeature, doubleSineTimeFeature, doubleCosineTimeFeature))
+
+    return features
+
 #Extract the ZSBN data
 
 start_date = pd.Timestamp("2017-10-01 00:00:00")
 end_date   = pd.Timestamp("2017-10-25 00:00:00") 
-alternateLocationOfInterest = "BUDF"
 
 endDateTimeForBadData = pd.Timestamp("2017-10-23 23:00:00")
 
@@ -690,13 +706,17 @@ ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <
 ZSBNGoodData = ZSBNGoodData.to_numpy()
 
 
-ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp > @endDateTimeForBadData and timestamp <= @end_date")
+ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp >= @endDateTimeForBadData and timestamp <= @end_date")
 ZSBNBadData = ZSBNBadData.to_numpy()
 
 timestamps = pd.date_range(start=start_date, end=end_date, freq='30T')
 
+timestampsForGoodData = pd.date_range(start=start_date, end=endDateTimeForBadData, freq='30T')
+
 #Extract the temp and humidty features
 features = ZSBNGoodData[:, 3:5]
+features = augmentData(features, timestampsForGoodData)
+features = sklearn.preprocessing.PolynomialFeatures(degree=2).fit_transform(features)
 
 targets = ZSBNGoodData[:, 2]
 
@@ -734,7 +754,11 @@ print(f"StDev of Residuals: {residualsStd}")
 confidenceWidth = 1.96 * residualsStd / np.sqrt(len(features))
 
 fullOctoberMonthData = merged_df_clustered.query(f"LocationName == 'ZSBN' and timestamp <= @end_date").to_numpy()
-regressedTargets = model.predict(ZSBNBadData[:, 3:5])
+timestampsForBadData = pd.date_range(start=endDateTimeForBadData, end=end_date, freq='30T')
+featuresFromBadData = ZSBNBadData[:, 3:5]
+featuresFromBadData = augmentData(featuresFromBadData, timestampsForBadData)
+featuresFromBadData = sklearn.preprocessing.PolynomialFeatures(degree=2).fit_transform(featuresFromBadData)
+regressedTargets = model.predict(featuresFromBadData)
 regressedTargets = np.append(targets, regressedTargets)	
 
 upperConfidenceInterval = regressedTargets + confidenceWidth
@@ -755,6 +779,22 @@ fig.add_trace(confidenceRegion)
 fig.update_layout(template='plotly_dark',title=dict(text="Correcting Sensor Drift in ZSBN (October 2017)"),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")))
 fig.show()
 
+# %%
+#zpfw
+#zhro
+
+data = merged_df_clustered.query("LocationName == 'ZHRO'").to_numpy()
+
+#Testing plot for ZSBN CO2 values with the hours feature
+fig = go.Figure()
+
+timeWithCO2 = go.Scatter(x=timestamps.hour, y=data[:, 2], mode='markers', name='CO2 Values')
+
+fig.add_trace(timeWithCO2)
+fig.update_layout(template='plotly_dark',title=dict(text="CO2 Values in ZHRO (October 2017)"),xaxis=dict(title=dict(text="Hour of the Day")),yaxis=dict(title=dict(text="CO2 [ppm]")))
+fig.show()
+
+
 # %% [markdown]
 # ### c) **10/35**
 #
@@ -769,8 +809,600 @@ fig.show()
 #     - the values obtained by the prediction of the linear model for the entire month of October
 #     - the __confidence interval__ obtained from cross validation
 # - What do you observe? Report your findings.
+#
+# ### Answers
+# 1) The method we choose to find drift in the sensors was to calcualte the exponential moving average as well as a Kalman Filter over the data. This would show us if there was a drift in a particular direction. The graphs were visually inspected and any graphs that had a particular trend up or down were classed as "drifting" and were fixed through a linear regression. Any sites with peaks that are unusually high were also classed as anomalous and were fixed through regression.
+#
+# 2) When fitting the regression data from "similar" sensors were used. In this case we choose the $N$-closest sensors to the sensor of choice that wasn't in the anomalous set we described above. The distance was calculated using the lat-lon coordinates and the Haversine distance formula.
+#
+# 3) For features I choose the temperature and humidity and then various frequency components based on the hour, minute and day of the timestamp (this is to allow for periodic trends). These features were expanded using a polynomial regression with degree 2 (this also adds a bias term). I also included the altiude and lat-lon coordinates.
 
 # %%
+# Performing two types of filtering on the data to detect drift.
+# The results are then plotted
+
+def kalmanFilter(data, Q=1e-5, R=0.1):
+    n = len(data)
+    xEst = np.zeros(n)
+    P = np.zeros(n)
+    xEst[0] = data[0]
+    P[0] = 1.0
+
+    for k in range(1, n):
+        xPred = xEst[k-1]
+        pPred = P[k-1] + Q
+        K = pPred / (pPred + R)
+        xEst[k] = xPred + K * (data[k] - xPred)
+        P[k] = (1 - K) * pPred
+    return xEst
+
+def exponentialMovingAverage(data, alpha=0.1):
+    emaArray = np.zeros(len(data))
+    emaArray[0] = data[0]
+    for i in range(1, len(data)):
+        emaArray[i] = alpha * data[i] + (1 - alpha) * emaArray[i-1]
+    return emaArray
+
+# --- Extract Unique Locations and Timestamps ---
+allLocations = merged_df_clustered['LocationName'].unique()
+timestamps = merged_df_clustered.index.unique()
+
+# --- Store Data for Each Location ---
+data_by_location = {}
+for location in allLocations:
+    # Extract CO₂ values for the location
+    data = merged_df_clustered.query(f"LocationName == '{location}'").to_numpy()
+    co2Values = data[:, 2]  # Assuming CO₂ values are in the 3rd column
+    
+    # Apply Kalman Filter and EMA
+    co2KalmanFiltered = kalmanFilter(co2Values.flatten())
+    alpha=0.1
+    co2EMAFiltered = exponentialMovingAverage(co2Values.flatten(), alpha=alpha)
+    
+    # Store processed data
+    data_by_location[location] = {
+        "co2Values": co2Values.flatten(),
+        "co2KalmanFiltered": co2KalmanFiltered,
+        "co2EMAFiltered": co2EMAFiltered,
+        "co2_mean": np.ones_like(co2Values.flatten())*np.mean(co2Values.flatten())
+    }
+
+# --- Create Interactive Plot with Slider ---
+fig = go.Figure()
+
+# Add traces for all locations (only the first one is visible initially)
+for i, location in enumerate(allLocations):
+    d = data_by_location[location]
+    
+    fig.add_trace(go.Scatter(x=timestamps, y=d["co2Values"], mode='lines', 
+                             name=f"{location} - Sensor Readings", visible=(i == 0),
+                             line=dict(color='blue')))
+    
+    fig.add_trace(go.Scatter(x=timestamps, y=d["co2KalmanFiltered"], mode='lines', 
+                             name=f"{location} - Kalman Filter", visible=(i == 0),
+                             line=dict(color='green')))
+    fig.add_trace(go.Scatter(x=timestamps, y=d["co2_mean"], mode='lines', 
+                             name=f"{location} - Mean", visible=(i == 0), 
+                             line=dict(color='orange', dash='dash')))
+    
+    fig.add_trace(go.Scatter(x=timestamps, y=d["co2EMAFiltered"], mode='lines', 
+                             name=f"{location} - EMA (α={alpha})", visible=(i == 0),
+                             line=dict(color='red', dash='dot')))
+
+steps = []
+n_traces_per_loc = 4  # Number of traces per location
+for i, location in enumerate(allLocations):
+    step = dict(
+        method="update",
+        args=[{"visible": [False] * len(fig.data)},
+              {"title": f"Drift Detection for {location}"}],
+        label=location
+    )
+    
+    # Enable only the traces corresponding to the selected location
+    for j in range(n_traces_per_loc):
+        step["args"][0]["visible"][i * n_traces_per_loc + j] = True
+    
+    steps.append(step)
+
+sliders = [dict(
+    active=0,
+    currentvalue={"prefix": "Location: "},
+    pad={"t": 50},
+    steps=steps
+)]
+
+fig.update_layout(
+    sliders=sliders,
+    title=f"Drift Detection for {allLocations[0]}",
+    xaxis_title="Time",
+    yaxis_title="CO₂ Concentration (ppm)",
+    template="plotly_dark",
+)
+
+fig.show()
+
+
+# %%
+#Helper functions for the regression below
+def augmentWithTimeFeatures(features, timestamps):
+    # Extract hour from the timestamp
+    hours = timestamps.hour
+    # Extract day of the week from the timestamp
+    days = timestamps.dayofweek
+    minutes = timestamps.minute
+
+    # #Add sinusoidal augmentations of the time data
+    dayPeriodic = np.sin(2 * np.pi * hours / 24)
+    halfDayPeriodic = np.sin(2 * np.pi * hours / 12)
+    hourlyPeriodic = np.sin(2 * np.pi * hours)
+    minutePeriodic = np.sin(2 * np.pi * hours*60)   
+    days = np.sin(2 * np.pi * days / 7)
+
+    # #Add cosine aufmentations of the time data
+    dayPeriodicCos = np.cos(2 * np.pi * hours / 24)
+    halfDayPeriodicCos = np.cos(2 * np.pi * hours / 12)
+    hourlyPeriodicCos = np.cos(2 * np.pi * hours)
+    minutePeriodicCos = np.cos(2 * np.pi * hours*60)
+    daysCos = np.cos(2 * np.pi * days / 7)
+
+    
+
+    # Add the extracted features to the input
+    features = np.column_stack((features, dayPeriodic, halfDayPeriodic, hourlyPeriodic, minutePeriodic, days, dayPeriodicCos, halfDayPeriodicCos, hourlyPeriodicCos, minutePeriodicCos, daysCos))
+    return features 
+
+def augmentWithBias(features):
+    # Add a bias term to the input
+    bias = np.ones((features.shape[0], 1))
+    features = np.column_stack((features, bias))
+    return features
+
+def haversine(lat1, lon1, lat2, lon2):
+    earthRadius = 6371 # in km
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2) * np.sin(dlat/2) + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2) * np.sin(dlon/2)
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return earthRadius*c
+
+# Function to find closest N sensors
+def find_closest_sensors(df, target_sensor_id, N=3, exludeList=[]):
+    latLonLocations = df[['LocationName', 'lat', 'lon']].drop_duplicates("LocationName")
+
+    target = latLonLocations[latLonLocations['LocationName'] == target_sensor_id].iloc[0]
+    target_lat, target_lon = target['lat'], target['lon']
+
+    # Compute distances to all other sensors
+    latLonLocations['distanceKM'] = haversine(target_lat, target_lon, latLonLocations['lat'], latLonLocations['lon'])
+
+    closestSensors = []
+    distances = []
+    # Sort and exclude the target sensor
+    closest_sensors = latLonLocations[latLonLocations['LocationName'] != target_sensor_id].sort_values(by='distanceKM')
+
+    for row in closest_sensors.itertuples():
+        if row.LocationName not in exludeList:
+            if len(closestSensors) == N:
+                break
+            closestSensors.append(row.LocationName) 
+            distances.append(row.distanceKM)   
+
+    return closestSensors,distances
+
+def doCrossValidation(goodRegionFeatures, timestampsForGoodRegion, targets, polynomalDegree=2):
+    #Do Cross Validation and select the best model
+    bestScore = 0
+    bestModel = None
+    bestMSE = np.inf
+    residuals = []
+
+    for i, (trainIdx, testIdx) in enumerate(sklearn.model_selection.TimeSeriesSplit(n_splits=7).split(goodRegionFeatures)):
+        model = sklearn.linear_model.LinearRegression()
+        #model = sklearn.pipeline.make_pipeline(sklearn.preprocessing.PolynomialFeatures(degree=polynomalDegree), model)  
+        model.fit(goodRegionFeatures[trainIdx], targets[trainIdx])    
+        yPred = model.predict(goodRegionFeatures[testIdx])
+
+        residuals.extend(targets[testIdx] - yPred)
+
+        #Calculate MSE between the predicted and actual values
+        mse = sklearn.metrics.mean_squared_error(targets[testIdx], yPred)
+    
+        score = model.score(goodRegionFeatures[testIdx], targets[testIdx])
+        #Save the model with the lowest MSE
+        if mse < bestMSE:
+            bestMSE = mse
+            bestScore = score
+            bestModel = model
+
+    residualsMean = np.mean(residuals)
+    residualsStd = np.std(residuals, ddof=1)
+
+    #Print the best score and coefficients
+    print(f"Best R\u00B2: {bestScore:.4f}")
+    print(f"Best model coefficients: {model.coef_}")
+    print(f"Best MSE: {bestMSE:.4f}")
+    print(f"Mean of Residuals: {residualsMean}")
+    print(f"StDev of Residuals: {residualsStd}")
+
+    confidenceWidth = 1.96 * residualsStd / np.sqrt(len(goodRegionFeatures))
+
+    return bestModel, confidenceWidth
+
+def plotWithConfidence(timestamps, regressedTargets, originalData, confidenceWidth, title):
+    upperConfidenceInterval = regressedTargets + confidenceWidth
+    lowerConfidenceInterval = regressedTargets - confidenceWidth
+
+    fig = go.Figure()
+
+    lineplot1 = go.Scatter(x=timestamps, y=regressedTargets, mode='lines', name='Corrected CO2 Values')
+    lineplotOriginal = go.Scatter(x=timestamps, y=originalData, line=dict(dash='dash'), name='Original CO2 Values')
+    confidenceRegion = go.Scatter(x=np.concatenate([timestamps, timestamps[::-1]]), y=np.concatenate([upperConfidenceInterval, lowerConfidenceInterval[::-1]]), fill='toself', fillcolor='rgba(255, 189, 139, 0.65)', line=dict(color='rgba(255, 189, 139, 0)'), name='95% Confidence Interval')
+
+    fig.add_trace(lineplot1)
+    fig.add_trace(lineplotOriginal)
+    fig.add_trace(confidenceRegion)
+    fig.update_layout(template='plotly_dark',title=dict(text=title),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")))
+    fig.show()
+
+def extractFeaturesAndAugment(array, polynomalDegree=2):
+    features = array[:, 3:5]
+    altitdue = array[:, 6]
+    latlon = array[:, 7:9]
+    features = augmentWithTimeFeatures(features, pd.date_range(start=start_date, periods=array.shape[0], freq='30min'))
+    features = sklearn.preprocessing.PolynomialFeatures(degree=2).fit_transform(features)
+    features = np.column_stack((features, altitdue, latlon))
+    return features
+
+
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI,
+#############################################
+
+dfWithFaultyData = merged_df_clustered.copy()
+
+start_date = pd.Timestamp("2017-10-01 00:00:00")
+end_date   = pd.Timestamp("2017-10-31 23:30:00")
+timestamps = pd.date_range(start=start_date, end=end_date, freq='30min')
+
+#Fixing ZRHO
+print("--------Attempting to fix ZHRO--------")
+
+#Find the 3-closest sensors to ZHRO
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+#Extract all the data for closest sensors
+goodRegionFeatures = [] 
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+
+#Get the good data from ZHRO and append it to the list
+ZHROGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
+ZHROGoodData = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp >= @ZHROGoodDataTimestamp").to_numpy() 
+ZHROFeatures = extractFeaturesAndAugment(ZHROGoodData)
+goodRegionFeatures.append(ZHROFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+
+ZHROGoodTargets = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp >= @ZHROGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZHROGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+#Do Cross Validation and select the best model
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZHROData = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp < @ZHROGoodDataTimestamp").to_numpy()
+print(ZHROData.shape[0])
+
+ZHROFeatures = extractFeaturesAndAugment(ZHROData)
+regressedTargets = bestModel.predict(ZHROFeatures)
+regressedTargets = np.append(regressedTargets, ZHROGoodTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZHRO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZHRODataFull[:, 2], confidenceWidth, "Correcting Sensor Drift in ZHRO (October 2017)")
+
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI,
+#Fixing ZPFW
+print("--------Attempting to fix ZPFW--------")
+
+#Find the 3-closest sensors to ZPFW
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZPFW", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+#Extract all the data for closest sensors
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#convert the features in to a numpy array
+ZPFWGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
+ZPFWGoodData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()
+ZPFWFeatures = extractFeaturesAndAugment(ZPFWGoodData)
+goodRegionFeatures.append(ZPFWFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+
+ZPFWGoodTargets = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZPFWGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+#Do Cross Validation and select the best model
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZPFWData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp < @ZPFWGoodDataTimestamp").to_numpy()
+ZPFWFullData = dfWithFaultyData.query("LocationName == 'ZPFW'").to_numpy()
+ZPFWFeatures = extractFeaturesAndAugment(ZPFWData)
+regressedTargets = bestModel.predict(ZPFWFeatures)
+regressedTargets = np.append(regressedTargets, ZPFWGoodTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZPFW", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+
+#Fixing ZTBN
+print("--------Attempting to fix ZTBN--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZTBN", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#Data less than this is good
+ZTBNGoodDataTimestamp = pd.Timestamp("2017-10-24 18:30:00")
+
+ZTBNGoodData = dfWithFaultyData.query("LocationName == 'ZTBN' and timestamp <= @ZTBNGoodDataTimestamp").to_numpy()
+ZTBNFeatures = extractFeaturesAndAugment(ZTBNGoodData)
+goodRegionFeatures.append(ZTBNFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+
+ZTBNGoodTargets = dfWithFaultyData.query("LocationName == 'ZTBN' and timestamp <= @ZTBNGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZTBNGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZTBNData = dfWithFaultyData.query("LocationName == 'ZTBN' and timestamp > @ZTBNGoodDataTimestamp").to_numpy()
+ZTBNFullData = dfWithFaultyData.query("LocationName == 'ZTBN'").to_numpy()
+ZTBNFeatures = extractFeaturesAndAugment(ZTBNData)
+regressedTargets = bestModel.predict(ZTBNFeatures)
+regressedTargets = np.append(ZTBNGoodTargets, regressedTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZTBN", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZTBNFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZTBN (October 2017)")
+
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+#ZSTL
+print("--------Attempting to fix ZSTL--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZSTL", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZSTLData = dfWithFaultyData.query("LocationName == 'ZSTL'").to_numpy()
+ZSTLFeatures = extractFeaturesAndAugment(ZSTLData)
+regressedTargets = bestModel.predict(ZSTLFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSTL", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZSTLData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSTL (October 2017)")
+
+
+# %%
+# Fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+
+#ZBRC
+print("--------Attempting to fix ZSTL--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZBRC", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZBRCData = dfWithFaultyData.query("LocationName == 'ZBRC'").to_numpy()
+ZBRCFeatures = extractFeaturesAndAugment(ZBRCData)
+regressedTargets = bestModel.predict(ZBRCFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZBRC", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZBRCData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZBRC (October 2017)")
+
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+#WMOO
+print("--------Attempting to fix WMOO--------")
+WMOOData = dfWithFaultyData.query("LocationName == 'WMOO'").to_numpy()
+
+alpha = 0.1
+
+meanCO2 = WMOOData[:, 2].mean()
+
+regressedTargets = exponentialMovingAverage(WMOOData[:, 2], alpha=alpha)
+
+#Computing Residual sum of squares
+residuals = WMOOData[:, 2] - regressedTargets
+mae = np.sum(np.abs(residuals)) / len(regressedTargets)
+score = 1 - np.sum(residuals**2) / np.sum((WMOOData[:, 2] - meanCO2)**2)
+print(f"The R\u00B2 value for WMOO is: {score}")
+print(f"The MSE is: {mae}")
+confidenceWidth = 1.96 * np.std(residuals) / np.sqrt(len(residuals))
+print(f"95% Confidence Width: {confidenceWidth}")
+
+
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "WMOO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, WMOOData[:, 2], confidenceWidth, f"Correcting Sensor Drift in WMOO with EMA alpha={alpha} (October 2017)")
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+#BSCR
+print("--------Attempting to fix BSCR--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
+BSCRFeatures = extractFeaturesAndAugment(BSCRData)
+regressedTargets = bestModel.predict(BSCRFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+#RCTZ
+print("--------Attempting to fix RCTZ--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "RCTZ", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+RCTZData = dfWithFaultyData.query("LocationName == 'RCTZ'").to_numpy()
+RCTZFeatures = extractFeaturesAndAugment(RCTZData)
+regressedTargets = bestModel.predict(RCTZFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "RCTZ", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, RCTZData[:, 2], confidenceWidth, "Correcting Sensor Drift in RCTZ (October 2017)")
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+#SZGL
+print("--------Attempting to fix SZGL--------")
+SZGLData = dfWithFaultyData.query("LocationName == 'SZGL'").to_numpy()
+
+alpha = 0.1
+
+meanCO2 = SZGLData[:, 2].mean()
+
+regressedTargets = exponentialMovingAverage(SZGLData[:, 2], alpha=alpha)
+
+#Computing Residual sum of squares
+residuals = SZGLData[:, 2] - regressedTargets
+residualsMean = residuals.mean()
+residualsStd = residuals.std()
+mae = np.sum(np.abs(residuals)) / len(regressedTargets)
+mse = np.sum(np.square(residuals)) / len(regressedTargets)
+score = 1 - np.sum(residuals**2) / np.sum((SZGLData[:, 2] - meanCO2)**2)
+
+confidenceWidth = 1.96 * residualsStd / np.sqrt(len(regressedTargets))
+
+print(f"Mean Absolute Error: {mae}")
+print(f"Mean Squared Error: {mse}")
+print(f"Best R\u00B2: {score}")
+
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, SZGLData[:, 2], confidenceWidth, f"Correcting Sensor Drift in SZGL with Exponential Moving Average alpha={alpha} (October 2017)")
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+
+#SMHK
+print("--------Attempting to fix SMHK--------")
+SMHKData = dfWithFaultyData.query("LocationName == 'SMHK'").to_numpy()
+
+alpha = 0.1
+
+meanCO2 = SMHKData[:, 2].mean()
+
+regressedTargets = exponentialMovingAverage(SMHKData[:, 2], alpha=alpha)
+
+#Computing Residual sum of squares
+residuals = SMHKData[:, 2] - regressedTargets
+residualsMean = residuals.mean()
+residualsStd = residuals.std()
+mae = np.sum(np.abs(residuals)) / len(regressedTargets)
+mse = np.sum(np.square(residuals)) / len(regressedTargets)
+score = 1 - np.sum(residuals**2) / np.sum((SMHKData[:, 2] - meanCO2)**2)
+
+confidenceWidth = 1.96 * residualsStd / np.sqrt(len(regressedTargets))
+
+print(f"Mean Absolute Error: {mae}")
+print(f"Mean Squared Error: {mse}")
+print(f"Best R\u00B2: {score}")
+
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, SMHKData[:, 2], confidenceWidth, f"Correcting Sensor Drift in SMHK with Exponential Moving Average alpha={alpha} (October 2017)")
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
+#UTLI
+print("--------Attempting to fix UTLI--------")
+UTLIData = dfWithFaultyData.query("LocationName == 'UTLI'").to_numpy()
+
+alpha = 0.05
+
+meanCO2 = UTLIData[:, 2].mean()
+
+regressedTargets = exponentialMovingAverage(UTLIData[:, 2], alpha=alpha)
+
+#Computing Residual sum of squares
+residuals = UTLIData[:, 2] - regressedTargets
+residualsMean = residuals.mean()
+residualsStd = residuals.std()
+mae = np.sum(np.abs(residuals)) / len(regressedTargets)
+mse = np.sum(np.square(residuals)) / len(regressedTargets)
+score = 1 - np.sum(residuals**2) / np.sum((UTLIData[:, 2] - meanCO2)**2)
+
+confidenceWidth = 1.96 * residualsStd / np.sqrt(len(regressedTargets))
+
+print(f"Mean Absolute Error: {mae}")
+print(f"Mean Squared Error: {mse}")
+print(f"Best R\u00B2: {score}")
+
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, f"Correcting Sensor Drift in UTLI with Exponential Moving Average alpha={alpha} (October 2017)")
 
 # %% [markdown]
 # ### d) **10/35**
@@ -781,6 +1413,8 @@ fig.show()
 # - Leverage at least two different feature selection methods
 # - Create similar interactive plot as in question c)
 # - Describe the methods you choose and report your findings
+#
+#
 
 # %% [markdown]
 # __Method 1: 
