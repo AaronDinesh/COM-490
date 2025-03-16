@@ -1417,14 +1417,39 @@ plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), 
 #
 
 # %% [markdown]
-# __Method 1: 
+# ## Method 1: Expert Feature Selection
+# In this we chose features that we thought would best model the CO2 emissions. We began with choosing temperature and humidity. After this we decided to choose the hour, minute and day of the timestamp. These temporal features were transformed using sinusoidal functions with varying periods. This allowed us to model periodic trends. We also added the altitude and lat-lon coordinates to the data (this came from the prior knowledge at the begining of the notebook)
+#
+#
+# We actually already impliemented this in question c) and so the results are the same and will not be rerun here
 
 # %%
 
 # %% [markdown]
-# __Method 2:
+# ## Method 2: Recursive Feature Elimination
+#
+# In this method we used recursive feature selection. At first we performed RFE on the raw features from the dataset. However in our testing, this method consistently yielded poor results. After this we decided to perform RFE on the features we had selected and augmented in question c).
 
 # %%
+#Fixing ZHRO
+print("--------Attempting to fix ZHRO--------")
+
+from sklearn.feature_selection import RFE
+rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=3)
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=5, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+
 
 # %% [markdown]
 # # That's all, folks!
