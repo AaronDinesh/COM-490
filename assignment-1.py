@@ -1271,27 +1271,49 @@ plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), 
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
 #BSCR
 print("--------Attempting to fix BSCR--------")
-closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
-
-goodRegionFeatures = []
-goodRegionTargets = []
-
-for sensor in closestSensors:
-    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
-    features = extractFeaturesAndAugment(data)
-    goodRegionFeatures.append(features)
-    goodRegionTargets.append(data[:, 2])
-
-goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
-goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
-
-bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
-print(f"95% Confidence Width: {confidenceWidth}")
 BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
-BSCRFeatures = extractFeaturesAndAugment(BSCRData)
-regressedTargets = bestModel.predict(BSCRFeatures)
+
+alpha = 0.1
+
+meanCO2 = BSCRData[:, 2].mean()
+
+regressedTargets = exponentialMovingAverage(BSCRData[:, 2], alpha=alpha)
+
+#Computing Residual sum of squares
+residuals = BSCRData[:, 2] - regressedTargets
+mae = np.sum(np.abs(residuals)) / len(regressedTargets)
+score = 1 - np.sum(residuals**2) / np.sum((BSCRData[:, 2] - meanCO2)**2)
+print(f"The R\u00B2 value for BSCR is: {score}")
+print(f"The MSE is: {mae}")
+confidenceWidth = 1.96 * np.std(residuals) / np.sqrt(len(residuals))
+print(f"95% Confidence Width: {confidenceWidth}")
+
+
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, f"Correcting Sensor Drift in BSCR with EMA alpha={alpha} (October 2017)")
+
+
+
+# closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+# goodRegionFeatures = []
+# goodRegionTargets = []
+
+# for sensor in closestSensors:
+#     data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+#     features = extractFeaturesAndAugment(data)
+#     goodRegionFeatures.append(features)
+#     goodRegionTargets.append(data[:, 2])
+
+# goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+# goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+# bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+# print(f"95% Confidence Width: {confidenceWidth}")
+# BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
+# BSCRFeatures = extractFeaturesAndAugment(BSCRData)
+# regressedTargets = bestModel.predict(BSCRFeatures)
+# #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
+# plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
@@ -1398,10 +1420,10 @@ score = 1 - np.sum(residuals**2) / np.sum((UTLIData[:, 2] - meanCO2)**2)
 
 confidenceWidth = 1.96 * residualsStd / np.sqrt(len(regressedTargets))
 
+print(f"Best R\u00B2: {score}")
 print(f"Mean Absolute Error: {mae}")
 print(f"Mean Squared Error: {mse}")
-print(f"Best R\u00B2: {score}")
-
+print(f"95% Confidence Width: {confidenceWidth}")
 plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, f"Correcting Sensor Drift in UTLI with Exponential Moving Average alpha={alpha} (October 2017)")
 
 # %% [markdown]
@@ -1435,7 +1457,7 @@ plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), 
 print("--------Attempting to fix ZHRO--------")
 
 from sklearn.feature_selection import RFE
-rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=3)
+rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=30)
 
 closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=5, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
 
@@ -1449,7 +1471,30 @@ for sensor in closestSensors:
     goodRegionFeatures.append(features)
     goodRegionTargets.append(data[:, 2])
 
+#convert the features in to a numpy array
+ZPFWGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
+ZPFWGoodData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()
+ZPFWFeatures = extractFeaturesAndAugment(ZPFWGoodData)
+goodRegionFeatures.append(ZPFWFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
 
+ZPFWGoodTargets = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZPFWGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+rfe.fit(goodRegionFeatures, goodRegionTargets)
+goodRegionFeatures = goodRegionFeatures[:, rfe.get_support()]
+
+#Do Cross Validation and select the best model
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZPFWData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp < @ZPFWGoodDataTimestamp").to_numpy()
+ZPFWFullData = dfWithFaultyData.query("LocationName == 'ZPFW'").to_numpy()
+ZPFWFeatures = extractFeaturesAndAugment(ZPFWData)
+regressedTargets = bestModel.predict(ZPFWFeatures[:, rfe.get_support()])
+regressedTargets = np.append(regressedTargets, ZPFWGoodTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZPFW", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
 
 # %% [markdown]
 # # That's all, folks!
