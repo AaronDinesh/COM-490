@@ -2398,7 +2398,7 @@ print("--------Attempting to fix ZHRO--------")
 
 from sklearn.feature_selection import RFE
 
-closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=3, exludeList=["ZHRO", "ZSBN", "ZHRO", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=5, exludeList=["ZHRO", "ZSBN", "ZHRO", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
 
 
 goodRegionFeatures = []
