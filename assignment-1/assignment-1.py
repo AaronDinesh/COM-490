@@ -563,7 +563,8 @@ fig.update_layout(
     xaxis_title='Altitude [m]',
     yaxis_title='Monthly Median CO2 [ppm]',
     width=900,
-    height=700
+    height=700,
+    template='plotly_dark'
 )
 fig.show()
 
@@ -616,7 +617,8 @@ fig.update_layout(
     width=1200,
     xaxis_title='Longitude',
     yaxis_title='Latitude',
-    title='Daily mean CO2 [ppm] density over Zurich')
+    title='Daily mean CO2 [ppm] density over Zurich'),
+    template='plotly_dark'
 fig.show()
 
 # %% [markdown]
@@ -652,7 +654,8 @@ fig.update_layout(
     xaxis_title="Date",
     yaxis_title="CO2 [ppm]",
     legend_title="Sensor",
-    hovermode='x unified'
+    hovermode='x unified',
+    template='plotly_dark'
 )
 fig.show()
 
@@ -797,7 +800,7 @@ fig.show()
 #
 # 2) When fitting the regression data from "similar" sensors were used. In this case we choose the $N$-closest sensors to the sensor of choice that wasn't in the anomalous set we described above. The distance was calculated using the lat-lon coordinates and the Haversine distance formula.
 #
-# 3) For features I choose the temperature and humidity and then various frequency components based on the hour, minute and day of the timestamp (this is to allow for periodic trends). These features were expanded using a polynomial regression with degree 2 (this also adds a bias term). I also included the altiude and lat-lon coordinates.
+# 3) For features I choose the temperature and humidity and then various frequency components based on the hour, minute and day of the timestamp (this is to allow for periodic trends). These features were expanded using a polynomial regression with degree 2 (this also adds a bias term). I also included the altitude and lat-lon coordinates.
 
 # %%
 # Performing two types of filtering on the data to detect drift.
@@ -1029,7 +1032,7 @@ def plotWithConfidence(timestamps, regressedTargets, originalData, confidenceWid
     fig.update_layout(template='plotly_dark',title=dict(text=title),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")), hovermode="x unified")
     fig.show()
 
-def extractFeaturesAndAugment(array, polynomalDegree=2):
+def extractFeaturesAndAugment(array, polynomalDegree=2, start_date = pd.Timestamp("2017-10-01 00:00:00")):
     features = array[:, 3:5]
     altitdue = array[:, 6]
     latlon = array[:, 7:9]
@@ -1087,8 +1090,66 @@ ZHROFeatures = extractFeaturesAndAugment(ZHROData)
 regressedTargets = bestModel.predict(ZHROFeatures)
 regressedTargets = np.append(regressedTargets, ZHROGoodTargets)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZHRO", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZHRODataFull[:, 2], confidenceWidth, "Correcting Sensor Drift in ZHRO (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZHRODataFull[:, 2], confidenceWidth, "Correcting Sensor Drift in ZHRO (October 2017)")
 
+
+# %%
+#Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI,
+#Fixing ZSBN
+print("--------Attempting to fix ZSBN--------")
+start_date = pd.Timestamp("2017-10-01 00:00:00")
+end_date   = pd.Timestamp("2017-10-25 00:00:00") 
+
+endDateTimeForBadData = pd.Timestamp("2017-10-23 23:00:00")
+
+
+
+#Find the 3-closest sensors to ZSBN
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZSBN", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+#Extract all the data for closest sensors
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#Get the good data from ZSBN and append it to the list
+
+ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <= @endDateTimeForBadData")
+ZSBNGoodData = ZSBNGoodData.to_numpy()
+
+
+ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp >= @endDateTimeForBadData and timestamp <= @end_date")
+ZSBNBadData = ZSBNBadData.to_numpy()
+
+ZSBNData = merged_df_clustered.query("LocationName == 'ZSBN'")
+ZSBNData = ZSBNData.to_numpy()
+
+
+timestamps = pd.date_range(start=start_date, end=end_date, freq='30min')
+
+timestampsForGoodData = pd.date_range(start=start_date, end=endDateTimeForBadData, freq='30min')
+
+#Extract the temp and humidty features
+features = extractFeaturesAndAugment(ZSBNGoodData)
+goodRegionFeatures.append(features)
+goodRegionTargets.append(ZSBNGoodData[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+#Do Cross Validation and select the best model
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestampsForGoodData, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+ZSBNFeatures = extractFeaturesAndAugment(ZSBNBadData)
+regressedTargets = bestModel.predict(ZSBNFeatures)
+regressedTargets = np.append(ZSBNGoodData[:, 2], regressedTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSBN", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZSBNData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSBN (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI,
@@ -1128,7 +1189,8 @@ ZPFWFeatures = extractFeaturesAndAugment(ZPFWData)
 regressedTargets = bestModel.predict(ZPFWFeatures)
 regressedTargets = np.append(regressedTargets, ZPFWGoodTargets)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZPFW", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
+assert len(regressedTargets) == len(ZPFWFullData)
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
@@ -1166,7 +1228,7 @@ ZTBNFeatures = extractFeaturesAndAugment(ZTBNData)
 regressedTargets = bestModel.predict(ZTBNFeatures)
 regressedTargets = np.append(ZTBNGoodTargets, regressedTargets)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZTBN", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZTBNFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZTBN (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZTBNFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZTBN (October 2017)")
 
 
 # %%
@@ -1193,7 +1255,7 @@ ZSTLData = dfWithFaultyData.query("LocationName == 'ZSTL'").to_numpy()
 ZSTLFeatures = extractFeaturesAndAugment(ZSTLData)
 regressedTargets = bestModel.predict(ZSTLFeatures)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSTL", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZSTLData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSTL (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZSTLData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSTL (October 2017)")
 
 
 # %%
@@ -1221,7 +1283,7 @@ ZBRCData = dfWithFaultyData.query("LocationName == 'ZBRC'").to_numpy()
 ZBRCFeatures = extractFeaturesAndAugment(ZBRCData)
 regressedTargets = bestModel.predict(ZBRCFeatures)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZBRC", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZBRCData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZBRC (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZBRCData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZBRC (October 2017)")
 
 
 # %%
@@ -1236,6 +1298,7 @@ meanCO2 = WMOOData[:, 2].mean()
 
 regressedTargets = exponentialMovingAverage(WMOOData[:, 2], alpha=alpha)
 
+print("--------Using the EMA Model to correct WMOO--------")
 #Computing Residual sum of squares
 residuals = WMOOData[:, 2] - regressedTargets
 mae = np.sum(np.abs(residuals)) / len(regressedTargets)
@@ -1245,9 +1308,33 @@ print(f"The MSE is: {mae}")
 confidenceWidth = 1.96 * np.std(residuals) / np.sqrt(len(residuals))
 print(f"95% Confidence Width: {confidenceWidth}")
 
-
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "WMOO", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, WMOOData[:, 2], confidenceWidth, f"Correcting Sensor Drift in WMOO with EMA alpha={alpha} (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, WMOOData[:, 2], confidenceWidth, f"Correcting Sensor Drift in WMOO with EMA alpha={alpha} (October 2017)")
+
+
+print("--------Using the Polynomial Model to correct WMOO--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "WMOO", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+WMOOData = dfWithFaultyData.query("LocationName == 'WMOO'").to_numpy()
+WMOOFeatures = extractFeaturesAndAugment(WMOOData)
+regressedTargets = bestModel.predict(WMOOFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "WMOO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, WMOOData[:, 2], confidenceWidth, "Correcting Sensor Drift in WMOO (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
@@ -1260,7 +1347,7 @@ alpha = 0.1
 meanCO2 = BSCRData[:, 2].mean()
 
 regressedTargets = exponentialMovingAverage(BSCRData[:, 2], alpha=alpha)
-
+print("--------Using the EMA Model to correct BSCR--------")
 #Computing Residual sum of squares
 residuals = BSCRData[:, 2] - regressedTargets
 mae = np.sum(np.abs(residuals)) / len(regressedTargets)
@@ -1272,30 +1359,30 @@ print(f"95% Confidence Width: {confidenceWidth}")
 
 
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, f"Correcting Sensor Drift in BSCR with EMA alpha={alpha} (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, f"Correcting Sensor Drift in BSCR with EMA alpha={alpha} (October 2017)")
 
 
+print("--------Using the Polynomial Model to correct BSCR--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+goodRegionFeatures = []
+goodRegionTargets = []
 
-# closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
-# goodRegionFeatures = []
-# goodRegionTargets = []
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
 
-# for sensor in closestSensors:
-#     data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
-#     features = extractFeaturesAndAugment(data)
-#     goodRegionFeatures.append(features)
-#     goodRegionTargets.append(data[:, 2])
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
 
-# goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
-# goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
-
-# bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
-# print(f"95% Confidence Width: {confidenceWidth}")
-# BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
-# BSCRFeatures = extractFeaturesAndAugment(BSCRData)
-# regressedTargets = bestModel.predict(BSCRFeatures)
-# #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
-# plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
+BSCRFeatures = extractFeaturesAndAugment(BSCRData)
+regressedTargets = bestModel.predict(BSCRFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
@@ -1321,35 +1408,34 @@ RCTZData = dfWithFaultyData.query("LocationName == 'RCTZ'").to_numpy()
 RCTZFeatures = extractFeaturesAndAugment(RCTZData)
 regressedTargets = bestModel.predict(RCTZFeatures)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "RCTZ", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, RCTZData[:, 2], confidenceWidth, "Correcting Sensor Drift in RCTZ (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, RCTZData[:, 2], confidenceWidth, "Correcting Sensor Drift in RCTZ (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
 #SZGL
 print("--------Attempting to fix SZGL--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "SZGL", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
 SZGLData = dfWithFaultyData.query("LocationName == 'SZGL'").to_numpy()
-
-alpha = 0.1
-
-meanCO2 = SZGLData[:, 2].mean()
-
-regressedTargets = exponentialMovingAverage(SZGLData[:, 2], alpha=alpha)
-
-#Computing Residual sum of squares
-residuals = SZGLData[:, 2] - regressedTargets
-residualsMean = residuals.mean()
-residualsStd = residuals.std()
-mae = np.sum(np.abs(residuals)) / len(regressedTargets)
-mse = np.sum(np.square(residuals)) / len(regressedTargets)
-score = 1 - np.sum(residuals**2) / np.sum((SZGLData[:, 2] - meanCO2)**2)
-
-confidenceWidth = 1.96 * residualsStd / np.sqrt(len(regressedTargets))
-
-print(f"Mean Absolute Error: {mae}")
-print(f"Mean Squared Error: {mse}")
-print(f"Best R\u00B2: {score}")
-
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, SZGLData[:, 2], confidenceWidth, f"Correcting Sensor Drift in SZGL with Exponential Moving Average alpha={alpha} (October 2017)")
+SZGLFeatures = extractFeaturesAndAugment(SZGLData)
+regressedTargets = bestModel.predict(SZGLFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "SZGL", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SZGLData[:, 2], confidenceWidth, "Correcting Sensor Drift in SZGL (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
@@ -1362,6 +1448,7 @@ alpha = 0.1
 
 meanCO2 = SMHKData[:, 2].mean()
 
+print("--------Using the EMA Model to correct SMHK--------")
 regressedTargets = exponentialMovingAverage(SMHKData[:, 2], alpha=alpha)
 
 #Computing Residual sum of squares
@@ -1378,7 +1465,31 @@ print(f"Mean Absolute Error: {mae}")
 print(f"Mean Squared Error: {mse}")
 print(f"Best R\u00B2: {score}")
 
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, SMHKData[:, 2], confidenceWidth, f"Correcting Sensor Drift in SMHK with Exponential Moving Average alpha={alpha} (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SMHKData[:, 2], confidenceWidth, f"Correcting Sensor Drift in SMHK with Exponential Moving Average alpha={alpha} (October 2017)")
+
+print("--------Using the Polynomial Model to correct SMHK--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "SMHK", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+SMHKData = dfWithFaultyData.query("LocationName == 'SMHK'").to_numpy()
+SMHKFeatures = extractFeaturesAndAugment(SMHKData)
+regressedTargets = bestModel.predict(SMHKFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "SMHK", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SMHKData[:, 2], confidenceWidth, "Correcting Sensor Drift in SMHK (October 2017)")
 
 # %%
 #Sites to fix ZHRO, (ZSBN), ZPFW, ZTBN, ZSTL, ZBRC, WMOO, BSCR, RCTZ, SZGL, SMHK, UTLI
@@ -1391,7 +1502,7 @@ alpha = 0.05
 meanCO2 = UTLIData[:, 2].mean()
 
 regressedTargets = exponentialMovingAverage(UTLIData[:, 2], alpha=alpha)
-
+print("--------Using the EMA Model to correct UTLI--------")
 #Computing Residual sum of squares
 residuals = UTLIData[:, 2] - regressedTargets
 residualsMean = residuals.mean()
@@ -1406,7 +1517,31 @@ print(f"Best R\u00B2: {score}")
 print(f"Mean Absolute Error: {mae}")
 print(f"Mean Squared Error: {mse}")
 print(f"95% Confidence Width: {confidenceWidth}")
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, f"Correcting Sensor Drift in UTLI with Exponential Moving Average alpha={alpha} (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, f"Correcting Sensor Drift in UTLI with Exponential Moving Average alpha={alpha} (October 2017)")
+
+print("--------Using the Polynomial Model to correct UTLI--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "UTLI", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+bestModel, confidenceWidth = doCrossValidation(goodRegionFeatures, timestamps, goodRegionTargets, polynomalDegree=2)
+print(f"95% Confidence Width: {confidenceWidth}")
+UTLIData = dfWithFaultyData.query("LocationName == 'UTLI'").to_numpy()
+UTLIFeatures = extractFeaturesAndAugment(UTLIData)
+regressedTargets = bestModel.predict(UTLIFeatures)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "UTLI", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, "Correcting Sensor Drift in UTLI (October 2017)")
 
 
 # %% [markdown]
@@ -1422,18 +1557,29 @@ plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), 
 #
 
 # %% [markdown]
-# ## Method 1: Expert Feature Selection
-# In this we chose features that we thought would best model the CO2 emissions. We began with choosing temperature and humidity. After this we decided to choose the hour, minute and day of the timestamp. These temporal features were transformed using sinusoidal functions with varying periods. This allowed us to model periodic trends. We also added the altitude and lat-lon coordinates to the data (this came from the prior knowledge at the begining of the notebook)
+# ## Preamble
+# We found that only using the features provided in the dataset was not enough to model the data. We found that these gave us low (or in some cases negative) $R^2$ score. So instead of performing feature selection on the provided features, we decided to perform it on the features we developed in Q3c. The feature we selected were:
+# 1) Temperature
+# 2) Humidity
+# 3) Time-dependent features (hour and day of the week)
+# 4) Latitude and Longitude
+# 5) Altitude
+#
+# The temperature and humidity were chosen since those were the features suggested in the question. We also noticed that there was a periodic component to the $CO_2$ data. This makes sense since we expect that $CO_2$ emissions due to cars and people would be periodic. So to model this trend we decided to make use of sinusoidal encodings of the hour and the day. This will allow us to capture daily trends as well as hourly, half-hourly and minute trends. These features were then expanded through the use of a polynomial augmentation with degree 2. We also surmised that there was a spatial correlation to the $CO_2$ emissions. We expect that $CO_2$ sensors that are closer together should see similar trends in $CO_2$ levels as traffic passes by. This is why we decided to include the Latitude and Longitiude coordinates for each sensor. Finally we also suspected that the altitude of each sensor played a role in the recorded $CO_2$ levels. We expect that the readings recorded from a high altitude sensors would be different than one from a sensor at a low altitude in the city. It should be noted that in our testing we saw significant degradation in our model from a polynomial expansion on the spatial features and so they were left untouched.
+#
+# As seen in the previous question, we used an exponential moving average for some of the sensors as they provided a better fit of the data rather than a linear regression model. In this question we will investigate to see if feature pruning might improve our models
 #
 #
-# We actually already impliemented this in question c) and so the results are the same and will not be rerun here
-
-# %%
-
-# %% [markdown]
-# ## Method 2: Recursive Feature Elimination
 #
-# In this method we used recursive feature selection. At first we performed RFE on the raw features from the dataset. However in our testing, this method consistently yielded poor results. After this we decided to perform RFE on the features we had selected and augmented in question c). We iteratively allowed RFE to include more features and computed a regression for all of them. At the end the regressors with the highest $R^2$ score were selected. In some cases this showed a dramatic imporvement. For example take the ZTBN site, RFE allowed us to drop the feature count from 93 down to 8.
+# ## Method 1: Mutual Information Regression
+#
+# This takes a statistical signal processing approach to feature selection. Here we compute the Mutual information between the features and the target. With the mutual information being defined as:
+# $$
+# \begin{align*}
+#     I(X; Y) = \sum_{x,y}{p(x, y)\log\frac{p(x, y)}{p(x)p(y)}}
+# \end{align*}
+# $$
+# This measures the reduction in the uncertainty of $Y$ given that we know $X$. First the method estimates the probability distribution of $X$ and $Y$. Then using the fomula above we can compute the Mutual Information between the features and the target. The features with the highest Mutual Information scores are selected. The ones with scores close to 0 can be dropped as they provide very little information about the target. This method has the benefit of working for both linear and non-linear models. We then iteratively compute the $R^2$ scores for increasing number of features until the best model is found.
 
 # %%
 def doCrossValidationWithScore(goodRegionFeatures, timestampsForGoodRegion, targets, polynomalDegree=2):
@@ -1477,12 +1623,773 @@ def doCrossValidationWithScore(goodRegionFeatures, timestampsForGoodRegion, targ
 
 
 # %%
+from sklearn.feature_selection import mutual_info_regression
+print("--------Attempting to fix ZHRO--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#convert the features in to a numpy array
+ZHROGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
+ZHROGoodData = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp >= @ZHROGoodDataTimestamp").to_numpy()
+ZHROFeatures = extractFeaturesAndAugment(ZHROGoodData)
+goodRegionFeatures.append(ZHROFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+
+ZHROGoodTargets = ZHROGoodData[:, 2]
+goodRegionTargets.append(ZHROGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []
+models = []
+supports = []
+confidenceWidths = []
+MSEs = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]): 
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+
+scoreMaxIdx = np.argmax(scores)
+
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZHRO")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZHROData = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp < @ZHROGoodDataTimestamp").to_numpy()
+ZHROFullData = dfWithFaultyData.query("LocationName == 'ZHRO'").to_numpy()
+ZHROFeatures = extractFeaturesAndAugment(ZHROData)
+regressedTargets = bestModel.predict(ZHROFeatures[:, bestSupport])
+regressedTargets = np.append(regressedTargets, ZHROGoodTargets)
+assert len(regressedTargets) == len(ZHROFullData[:, 2])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZHRO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZHROFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZHRO (October 2017)")
+
+
+# %%
+#ZSBN
+print("--------Attempting to fix ZSBN--------")
+
+start_date = pd.Timestamp("2017-10-01 00:00:00")
+end_date   = pd.Timestamp("2017-10-25 00:00:00") 
+
+endDateTimeForBadData = pd.Timestamp("2017-10-23 23:00:00")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZSBN", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+#Extract all the data for closest sensors
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#Get the good data from ZSBN and append it to the list
+
+ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <= @endDateTimeForBadData")
+ZSBNGoodData = ZSBNGoodData.to_numpy()
+
+
+ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp >= @endDateTimeForBadData and timestamp <= @end_date")
+ZSBNBadData = ZSBNBadData.to_numpy()
+
+ZSBNData = merged_df_clustered.query("LocationName == 'ZSBN'")
+ZSBNData = ZSBNData.to_numpy()
+
+
+timestamps = pd.date_range(start=start_date, end=end_date, freq='30min')
+
+timestampsForGoodData = pd.date_range(start=start_date, end=endDateTimeForBadData, freq='30min')
+
+#Extract the temp and humidty features
+features = extractFeaturesAndAugment(ZSBNGoodData)
+goodRegionFeatures.append(features)
+goodRegionTargets.append(ZSBNGoodData[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []
+models = []
+supports = []
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZPFW")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZSBNFeatures = extractFeaturesAndAugment(ZSBNBadData)
+regressedTargets = bestModel.predict(ZSBNFeatures[:, bestSupport])
+regressedTargets = np.append(ZSBNGoodData[:, 2], regressedTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSBN", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZSBNData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSBN (October 2017)")
+
+# %%
+print("--------Attempting to fix ZPFW--------")
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZPFW", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+ZPFWGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
+ZPFWGoodData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()
+ZPFWFeatures = extractFeaturesAndAugment(ZPFWGoodData)
+goodRegionFeatures.append(ZPFWFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+
+ZPFWGoodTargets = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZPFWGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []
+models = []
+supports = []
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZPFW")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZPFWData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp < @ZPFWGoodDataTimestamp").to_numpy()
+ZPFWFullData = dfWithFaultyData.query("LocationName == 'ZPFW'").to_numpy()
+ZPFWFeatures = extractFeaturesAndAugment(ZPFWData)
+regressedTargets = bestModel.predict(ZPFWFeatures[:, bestSupport])
+regressedTargets = np.append(regressedTargets, ZPFWGoodTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZPFW", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
+
+# %%
+print("--------Attempting to fix ZTBN--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZTBN", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#Data less than this is good
+ZTBNGoodDataTimestamp = pd.Timestamp("2017-10-24 18:30:00")
+
+ZTBNGoodData = dfWithFaultyData.query("LocationName == 'ZTBN' and timestamp <= @ZTBNGoodDataTimestamp").to_numpy()
+ZTBNFeatures = extractFeaturesAndAugment(ZTBNGoodData)
+goodRegionFeatures.append(ZTBNFeatures)
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+
+ZTBNGoodTargets = dfWithFaultyData.query("LocationName == 'ZTBN' and timestamp <= @ZTBNGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZTBNGoodTargets)
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZTBN")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}") 
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZTBNData = dfWithFaultyData.query("LocationName == 'ZTBN' and timestamp > @ZTBNGoodDataTimestamp").to_numpy()
+ZTBNFullData = dfWithFaultyData.query("LocationName == 'ZTBN'").to_numpy()
+ZTBNFeatures = extractFeaturesAndAugment(ZTBNData)
+regressedTargets = bestModel.predict(ZTBNFeatures[:, bestSupport])
+regressedTargets = np.append(ZTBNGoodTargets, regressedTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZTBN", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZTBNFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZTBN (October 2017)")
+
+# %%
+print("--------Attempting to fix ZSTL--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZSTL", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZSTL")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZSTLData = dfWithFaultyData.query("LocationName == 'ZSTL'").to_numpy()
+ZSTLFeatures = extractFeaturesAndAugment(ZSTLData)
+regressedTargets = bestModel.predict(ZSTLFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSTL", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZSTLData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSTL (October 2017)")
+
+# %%
+print("--------Attempting to fix WMOO--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "WMOO", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for WMOO")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+WMOOData = dfWithFaultyData.query("LocationName == 'WMOO'").to_numpy()
+WMOOFeatures = extractFeaturesAndAugment(WMOOData)
+regressedTargets = bestModel.predict(WMOOFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "WMOO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, WMOOData[:, 2], confidenceWidth, "Correcting Sensor Drift in WMOO (October 2017)")
+
+# %%
+print("--------Attempting to fix BSCR--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]    
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for BSCR")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
+BSCRFeatures = extractFeaturesAndAugment(BSCRData)
+regressedTargets = bestModel.predict(BSCRFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
+
+# %%
+print("--------Attempting to fix ZBRC--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZBRC", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+    support = np.argsort(selectorScores)[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZBRC")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZBRCData = dfWithFaultyData.query("LocationName == 'ZBRC'").to_numpy()
+ZBRCFeatures = extractFeaturesAndAugment(ZBRCData)
+regressedTargets = bestModel.predict(ZBRCFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZBRC", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZBRCData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZBRC (October 2017)")
+
+# %%
+print("--------Attempting to fix RCTZ--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "RCTZ", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for RCTZ")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+RCTZData = dfWithFaultyData.query("LocationName == 'RCTZ'").to_numpy()
+RCTZFeatures = extractFeaturesAndAugment(RCTZData)
+regressedTargets = bestModel.predict(RCTZFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "RCTZ", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, RCTZData[:, 2], confidenceWidth, "Correcting Sensor Drift in RCTZ (October 2017)")
+
+# %%
+print("--------Attempting to fix SZGL--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "SZGL", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for SZGL")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+SZGLData = dfWithFaultyData.query("LocationName == 'SZGL'").to_numpy()
+SZGLFeatures = extractFeaturesAndAugment(SZGLData)
+regressedTargets = bestModel.predict(SZGLFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "SZGL", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SZGLData[:, 2], confidenceWidth, "Correcting Sensor Drift in SZGL (October 2017)")
+
+# %%
+print("--------Attempting to fix SMHK--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "SMHK", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for SMHK")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+SMHKData = dfWithFaultyData.query("LocationName == 'SMHK'").to_numpy()
+SMHKFeatures = extractFeaturesAndAugment(SMHKData)
+regressedTargets = bestModel.predict(SMHKFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "SMHK", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SMHKData[:, 2], confidenceWidth, "Correcting Sensor Drift in SMHK (October 2017)")
+
+# %%
+print("--------Attempting to fix UTLI--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "UTLI", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+selectorScores = mutual_info_regression(goodRegionFeatures, goodRegionTargets)
+selectorScoresSorted = np.argsort(selectorScores)
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")    
+    support = selectorScoresSorted[-numFeat:]
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for UTLI")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+UTLIData = dfWithFaultyData.query("LocationName == 'UTLI'").to_numpy()
+UTLIFeatures = extractFeaturesAndAugment(UTLIData)
+regressedTargets = bestModel.predict(UTLIFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "UTLI", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, "Correcting Sensor Drift in UTLI (October 2017)")
+
+# %% [markdown]
+# ## Method 2: Recursive Feature Elimination
+#
+# The RFE algorithm perform iterative line fits on the data and drops the least important features. "Importance" in the case of a linear model is determined by its respective coefficient. RFE keeps dropping the least important features until the desired number of features are reached.
+#
+# We then iterativly performed RFE on the features we had selected and augmented in question c), allowing fewer and fewer features to be dropped each iteration. For each of these iterations we computed the $R^2$ score of the resulting model. The features that maximised the $R^2$ score were selected. In some cases this showed a dramatic imporvement. For example take the ZTBN site, RFE allowed us to drop the feature count from 93 down to 8.
+
+# %%
 #Fixing ZHRO
 print("--------Attempting to fix ZHRO--------")
 
 from sklearn.feature_selection import RFE
 
-closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=5, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZHRO", N=3, exludeList=["ZHRO", "ZSBN", "ZHRO", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
 
 
 goodRegionFeatures = []
@@ -1495,14 +2402,14 @@ for sensor in closestSensors:
     goodRegionTargets.append(data[:, 2])
 
 #convert the features in to a numpy array
-ZPFWGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
-ZPFWGoodData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()
-ZPFWFeatures = extractFeaturesAndAugment(ZPFWGoodData)
-goodRegionFeatures.append(ZPFWFeatures)
+ZHROGoodDataTimestamp = pd.Timestamp("2017-10-19 16:30:00")
+ZHROGoodData = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp >= @ZHROGoodDataTimestamp").to_numpy()
+ZHROFeatures = extractFeaturesAndAugment(ZHROGoodData)
+goodRegionFeatures.append(ZHROFeatures)
 goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
 
-ZPFWGoodTargets = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp >= @ZPFWGoodDataTimestamp").to_numpy()[:, 2]
-goodRegionTargets.append(ZPFWGoodTargets)
+ZHROGoodTargets = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp >= @ZHROGoodDataTimestamp").to_numpy()[:, 2]
+goodRegionTargets.append(ZHROGoodTargets)
 goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
 
 scores = []
@@ -1536,23 +2443,109 @@ fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title=
 fig.show()
 
 print("###### Final Results ######")
-print(f"Using {scoreMaxIdx} features")
+print(f"Using {scoreMaxIdx+2} features")
 print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
 print(f"Final 95% Confidence Width: {confidenceWidth}")
 
-ZPFWData = dfWithFaultyData.query("LocationName == 'ZPFW' and timestamp < @ZPFWGoodDataTimestamp").to_numpy()
-ZPFWFullData = dfWithFaultyData.query("LocationName == 'ZPFW'").to_numpy()
-ZPFWFeatures = extractFeaturesAndAugment(ZPFWData)
-regressedTargets = bestModel.predict(ZPFWFeatures[:, bestSupport])
-regressedTargets = np.append(regressedTargets, ZPFWGoodTargets)
-#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZPFW", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
+ZHROData = dfWithFaultyData.query("LocationName == 'ZHRO' and timestamp < @ZHROGoodDataTimestamp").to_numpy()
+ZHROFullData = dfWithFaultyData.query("LocationName == 'ZHRO'").to_numpy()
+ZHROFeatures = extractFeaturesAndAugment(ZHROData)
+regressedTargets = bestModel.predict(ZHROFeatures[:, bestSupport])
+regressedTargets = np.append(regressedTargets, ZHROGoodTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZHRO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZHROFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZHRO (October 2017)")
+
+# %%
+print("--------Attempting to fix ZSBN--------")
+
+start_date = pd.Timestamp("2017-10-01 00:00:00")
+end_date   = pd.Timestamp("2017-10-25 00:00:00") 
+
+endDateTimeForBadData = pd.Timestamp("2017-10-23 23:00:00")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZSBN", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+#Extract all the data for closest sensors
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+#Get the good data from ZSBN and append it to the list
+
+ZSBNGoodData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp <= @endDateTimeForBadData")
+ZSBNGoodData = ZSBNGoodData.to_numpy()
+
+
+ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp >= @endDateTimeForBadData and timestamp <= @end_date")
+ZSBNBadData = ZSBNBadData.to_numpy()
+
+ZSBNData = merged_df_clustered.query("LocationName == 'ZSBN'")
+ZSBNData = ZSBNData.to_numpy()
+
+
+timestamps = pd.date_range(start=start_date, end=end_date, freq='30min')
+
+timestampsForGoodData = pd.date_range(start=start_date, end=endDateTimeForBadData, freq='30min')
+
+#Extract the temp and humidty features
+features = extractFeaturesAndAugment(ZSBNGoodData)
+goodRegionFeatures.append(features)
+goodRegionTargets.append(ZSBNGoodData[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []
+models = []
+supports = []
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
+    rfe.fit(goodRegionFeatures, goodRegionTargets)
+    support = rfe.get_support()
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZPFW")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+ZSBNFeatures = extractFeaturesAndAugment(ZSBNBadData)
+regressedTargets = bestModel.predict(ZSBNFeatures[:, bestSupport])
+regressedTargets = np.append(ZSBNGoodData[:, 2], regressedTargets)
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSBN", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZSBNData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSBN (October 2017)")
 
 # %%
 #ZPFW
 print("--------Attempting to fix ZPFW--------")
 
-closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZPFW", N=5, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "ZPFW", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
 
 goodRegionFeatures = []
 goodRegionTargets = []
@@ -1603,7 +2596,7 @@ fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title=
 fig.show()
 
 print("###### Final Results ######")
-print(f"Using {scoreMaxIdx} features")
+print(f"Using {scoreMaxIdx+2} features")
 print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
 print(f"Final 95% Confidence Width: {confidenceWidth}")
 
@@ -1613,7 +2606,7 @@ ZPFWFeatures = extractFeaturesAndAugment(ZPFWData)
 regressedTargets = bestModel.predict(ZPFWFeatures[:, bestSupport])
 regressedTargets = np.append(regressedTargets, ZPFWGoodTargets)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZPFW", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZPFWFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZPFW (October 2017)")
 
 # %%
 print("--------Attempting to fix ZTBN--------")
@@ -1671,7 +2664,7 @@ fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title=
 fig.show()
 
 print("###### Final Results ######")
-print(f"Using {scoreMaxIdx} features")
+print(f"Using {scoreMaxIdx+2} features")
 print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}") 
 print(f"Final 95% Confidence Width: {confidenceWidth}")
 
@@ -1681,7 +2674,7 @@ ZTBNFeatures = extractFeaturesAndAugment(ZTBNData)
 regressedTargets = bestModel.predict(ZTBNFeatures[:, bestSupport])
 regressedTargets = np.append(ZTBNGoodTargets, regressedTargets)
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZTBN", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZTBNFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZTBN (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZTBNFullData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZTBN (October 2017)")
 
 # %%
 print("--------Attempting to fix ZSTL--------")
@@ -1731,7 +2724,7 @@ fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title=
 fig.show()
 
 print("###### Final Results ######")
-print(f"Using {scoreMaxIdx} features")
+print(f"Using {scoreMaxIdx+2} features")
 print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
 print(f"Final 95% Confidence Width: {confidenceWidth}")
 
@@ -1739,7 +2732,123 @@ ZSTLData = dfWithFaultyData.query("LocationName == 'ZSTL'").to_numpy()
 ZSTLFeatures = extractFeaturesAndAugment(ZSTLData)
 regressedTargets = bestModel.predict(ZSTLFeatures[:, bestSupport])
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZSTL", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZSTLData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSTL (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZSTLData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZSTL (October 2017)")
+
+# %%
+print("--------Attempting to fix WMOO--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "WMOO", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
+    rfe.fit(goodRegionFeatures, goodRegionTargets)
+    support = rfe.get_support()
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+ 
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for WMOO")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+WMOOData = dfWithFaultyData.query("LocationName == 'WMOO'").to_numpy()
+WMOOFeatures = extractFeaturesAndAugment(WMOOData)
+regressedTargets = bestModel.predict(WMOOFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "WMOO", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, WMOOData[:, 2], confidenceWidth, "Correcting Sensor Drift in WMOO (October 2017)")
+
+
+
+# %%
+print("--------Attempting to fix BSCR--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "BSCR", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
+    rfe.fit(goodRegionFeatures, goodRegionTargets)
+    support = rfe.get_support()
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for BSCR")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
+fig.show()
+
+print("###### Final Results ######")    
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+BSCRData = dfWithFaultyData.query("LocationName == 'BSCR'").to_numpy()
+BSCRFeatures = extractFeaturesAndAugment(BSCRData)
+regressedTargets = bestModel.predict(BSCRFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "BSCR", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, BSCRData[:, 2], confidenceWidth, "Correcting Sensor Drift in BSCR (October 2017)")
 
 # %%
 print("--------Attempting to fix ZBRC--------")
@@ -1789,7 +2898,7 @@ fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title=
 fig.show()
 
 print("###### Final Results ######")
-print(f"Using {scoreMaxIdx} features")
+print(f"Using {scoreMaxIdx+2} features")
 print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
 print(f"Final 95% Confidence Width: {confidenceWidth}")
 
@@ -1797,7 +2906,7 @@ ZBRCData = dfWithFaultyData.query("LocationName == 'ZBRC'").to_numpy()
 ZBRCFeatures = extractFeaturesAndAugment(ZBRCData)
 regressedTargets = bestModel.predict(ZBRCFeatures[:, bestSupport])
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "ZBRC", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, ZBRCData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZBRC (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, ZBRCData[:, 2], confidenceWidth, "Correcting Sensor Drift in ZBRC (October 2017)")
 
 # %%
 print("--------Attempting to fix RCTZ--------")
@@ -1847,7 +2956,7 @@ fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title=
 fig.show()
 
 print("###### Final Results ######")
-print(f"Using {scoreMaxIdx} features")
+print(f"Using {scoreMaxIdx+2} features")
 print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
 print(f"Final 95% Confidence Width: {confidenceWidth}")
 
@@ -1855,7 +2964,180 @@ RCTZData = dfWithFaultyData.query("LocationName == 'RCTZ'").to_numpy()
 RCTZFeatures = extractFeaturesAndAugment(RCTZData)
 regressedTargets = bestModel.predict(RCTZFeatures[:, bestSupport])
 #dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "RCTZ", "CO2"] = regressedTargets
-plotWithConfidence(pd.date_range(start=start_date, end=end_date, freq='30min'), regressedTargets, RCTZData[:, 2], confidenceWidth, "Correcting Sensor Drift in RCTZ (October 2017)")
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, RCTZData[:, 2], confidenceWidth, "Correcting Sensor Drift in RCTZ (October 2017)")
+
+# %%
+print("--------Attempting to fix SZGL--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "SZGL", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
+    rfe.fit(goodRegionFeatures, goodRegionTargets)
+    support = rfe.get_support()
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)    
+    models.append(bestModel)
+    scores.append(score)
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for SZGL")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()    
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+SZGLData = dfWithFaultyData.query("LocationName == 'SZGL'").to_numpy()
+SZGLFeatures = extractFeaturesAndAugment(SZGLData)
+regressedTargets = bestModel.predict(SZGLFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "SZGL", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SZGLData[:, 2], confidenceWidth, "Correcting Sensor Drift in SZGL (October 2017)")
+
+# %%
+print("--------Attempting to fix SMHK--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "SMHK", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
+    rfe.fit(goodRegionFeatures, goodRegionTargets)
+    support = rfe.get_support()
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)    
+    models.append(bestModel)
+    scores.append(score)    
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)    
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for SMHK")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+SMHKData = dfWithFaultyData.query("LocationName == 'SMHK'").to_numpy()
+SMHKFeatures = extractFeaturesAndAugment(SMHKData)
+regressedTargets = bestModel.predict(SMHKFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "SMHK", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, SMHKData[:, 2], confidenceWidth, "Correcting Sensor Drift in SZGL (October 2017)")
+
+# %%
+print("--------Attempting to fix UTLI--------")
+
+closestSensors, distances = find_closest_sensors(dfWithFaultyData, "UTLI", N=3, exludeList=["ZHRO", "ZSBN", "ZPFW", "ZTBN", "ZSTL", "ZBRC", "WMOO", "BSCR", "RCTZ", "SZGL", "SMHK", "UTLI"])
+
+goodRegionFeatures = []
+goodRegionTargets = []
+
+for sensor in closestSensors:
+    data = dfWithFaultyData.query(f"LocationName == '{sensor}'").to_numpy()
+    features = extractFeaturesAndAugment(data)
+    goodRegionFeatures.append(features)
+    goodRegionTargets.append(data[:, 2])
+
+goodRegionFeatures = np.vstack([np.array(x) for x in goodRegionFeatures])
+goodRegionTargets = np.concatenate(goodRegionTargets, axis=0)
+
+scores = []    
+models = []
+supports = []    
+confidenceWidths = []
+for numFeat in range(2, goodRegionFeatures.shape[1]):
+    #print(f"--------Testing {numFeat} features--------")
+    rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
+    rfe.fit(goodRegionFeatures, goodRegionTargets)
+    support = rfe.get_support()
+    supports.append(support)
+    features = goodRegionFeatures[:, support]
+    
+    #Do Cross Validation and select the best model
+    bestModel, confidenceWidth, score = doCrossValidationWithScore(features, timestamps, goodRegionTargets, polynomalDegree=2)
+    confidenceWidths.append(confidenceWidth)    
+    models.append(bestModel)
+    scores.append(score)    
+    #print(f"95% Confidence Width: {confidenceWidth}")
+
+scoreMaxIdx = np.argmax(scores)    
+bestSupport = supports[scoreMaxIdx]
+bestModel = models[scoreMaxIdx]
+confidenceWidth = confidenceWidths[scoreMaxIdx]
+
+#Plot all the scores using a darkmode plot    
+fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for UTLI")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
+fig.show()
+
+print("###### Final Results ######")    
+print(f"Using {scoreMaxIdx+2} features")
+print(f"Best R\u00b2 Score: {scores[scoreMaxIdx]}")
+print(f"Final 95% Confidence Width: {confidenceWidth}")
+
+UTLIData = dfWithFaultyData.query("LocationName == 'UTLI'").to_numpy()
+UTLIFeatures = extractFeaturesAndAugment(UTLIData)
+regressedTargets = bestModel.predict(UTLIFeatures[:, bestSupport])
+#dfWithFaultyData.loc[dfWithFaultyData["LocationName"] == "UTLI", "CO2"] = regressedTargets
+plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets), freq='30min'), regressedTargets, UTLIData[:, 2], confidenceWidth, "Correcting Sensor Drift in UTLI (October 2017)")
 
 # %% [markdown]
 # # That's all, folks!
+# ### Checking to see if all my changes were saved
