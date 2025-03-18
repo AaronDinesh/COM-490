@@ -706,9 +706,9 @@ ZSBNGoodData = ZSBNGoodData.to_numpy()
 ZSBNBadData = merged_df_clustered.query("LocationName == 'ZSBN' and timestamp >= @endDateTimeForBadData and timestamp <= @end_date")
 ZSBNBadData = ZSBNBadData.to_numpy()
 
-timestamps = pd.date_range(start=start_date, end=end_date, freq='30T')
+timestamps = pd.date_range(start=start_date, end=end_date, freq='30min')
 
-timestampsForGoodData = pd.date_range(start=start_date, end=endDateTimeForBadData, freq='30T')
+timestampsForGoodData = pd.date_range(start=start_date, end=endDateTimeForBadData, freq='30min')
 
 #Extract the temp and humidty features
 features = ZSBNGoodData[:, 3:5]
@@ -743,7 +743,7 @@ residualsStd = np.std(residuals, ddof=1)
 
 #Print the best score and coefficients
 print(f"Best R\u00B2: {bestScore:.4f}")
-print(f"Best model coefficients: {bestModel.coef_}")
+#print(f"Best model coefficients: {bestModel.coef_}")
 print(f"Best MSE: {bestMSE:.4f}")
 print(f"Mean of Residuals: {residualsMean}")
 print(f"StDev of Residuals: {residualsStd}")
@@ -751,7 +751,7 @@ print(f"StDev of Residuals: {residualsStd}")
 confidenceWidth = 1.96 * residualsStd / np.sqrt(len(features))
 
 fullOctoberMonthData = merged_df_clustered.query(f"LocationName == 'ZSBN' and timestamp <= @end_date").to_numpy()
-timestampsForBadData = pd.date_range(start=endDateTimeForBadData, end=end_date, freq='30T')
+timestampsForBadData = pd.date_range(start=endDateTimeForBadData, end=end_date, freq='30min')
 featuresFromBadData = ZSBNBadData[:, 3:5]
 featuresFromBadData = augmentData(featuresFromBadData, timestampsForBadData)
 featuresFromBadData = sklearn.preprocessing.PolynomialFeatures(degree=2).fit_transform(featuresFromBadData)
@@ -773,22 +773,7 @@ fig.add_trace(lineplot1)
 fig.add_trace(lineplotOriginal)
 fig.add_trace(confidenceRegion)
 
-fig.update_layout(template='plotly_dark',title=dict(text="Correcting Sensor Drift in ZSBN (October 2017)"),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")))
-fig.show()
-
-# %%
-#zpfw
-#zhro
-
-data = merged_df_clustered.query("LocationName == 'ZHRO'").to_numpy()
-
-#Testing plot for ZSBN CO2 values with the hours feature
-fig = go.Figure()
-
-timeWithCO2 = go.Scatter(x=timestamps.hour, y=data[:, 2], mode='markers', name='CO2 Values')
-
-fig.add_trace(timeWithCO2)
-fig.update_layout(template='plotly_dark',title=dict(text="CO2 Values in ZHRO (October 2017)"),xaxis=dict(title=dict(text="Hour of the Day")),yaxis=dict(title=dict(text="CO2 [ppm]")))
+fig.update_layout(template='plotly_dark',title=dict(text="Correcting Sensor Drift in ZSBN (October 2017)"),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")), hovermode="x unified")
 fig.show()
 
 
@@ -915,6 +900,7 @@ fig.update_layout(
     xaxis_title="Time",
     yaxis_title="CO₂ Concentration (ppm)",
     template="plotly_dark",
+    hovermode="x unified"
 )
 
 fig.show()
@@ -1018,7 +1004,7 @@ def doCrossValidation(goodRegionFeatures, timestampsForGoodRegion, targets, poly
 
     #Print the best score and coefficients
     print(f"Best R\u00B2: {bestScore:.4f}")
-    print(f"Best model coefficients: {model.coef_}")
+    #print(f"Best model coefficients: {model.coef_}")
     print(f"Best MSE: {bestMSE:.4f}")
     print(f"Mean of Residuals: {residualsMean}")
     print(f"StDev of Residuals: {residualsStd}")
@@ -1040,7 +1026,7 @@ def plotWithConfidence(timestamps, regressedTargets, originalData, confidenceWid
     fig.add_trace(lineplot1)
     fig.add_trace(lineplotOriginal)
     fig.add_trace(confidenceRegion)
-    fig.update_layout(template='plotly_dark',title=dict(text=title),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")))
+    fig.update_layout(template='plotly_dark',title=dict(text=title),xaxis=dict(title=dict(text="Timestamp")),yaxis=dict(title=dict(text="CO2 [ppm]")), hovermode="x unified")
     fig.show()
 
 def extractFeaturesAndAugment(array, polynomalDegree=2):
@@ -1479,11 +1465,11 @@ def doCrossValidationWithScore(goodRegionFeatures, timestampsForGoodRegion, targ
     residualsStd = np.std(residuals, ddof=1)
 
     #Print the best score and coefficients
-    print(f"Best R\u00B2: {bestScore:.4f}")
-    print(f"Best model coefficients: {model.coef_}")
-    print(f"Best MSE: {bestMSE:.4f}")
-    print(f"Mean of Residuals: {residualsMean}")
-    print(f"StDev of Residuals: {residualsStd}")
+    #print(f"Best R\u00B2: {bestScore:.4f}")
+    #print(f"Best model coefficients: {model.coef_}")
+    #print(f"Best MSE: {bestMSE:.4f}")
+    #print(f"Mean of Residuals: {residualsMean}")
+    #print(f"StDev of Residuals: {residualsStd}")
 
     confidenceWidth = 1.96 * residualsStd / np.sqrt(len(goodRegionFeatures))
 
@@ -1525,7 +1511,7 @@ supports = []
 confidenceWidths = []
 MSEs = []
 for numFeat in range(2, goodRegionFeatures.shape[1]): 
-    print(f"--------Testing {numFeat} features--------")
+    #print(f"--------Testing {numFeat} features--------")
     rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
     rfe.fit(goodRegionFeatures, goodRegionTargets)
     support = rfe.get_support()
@@ -1537,16 +1523,16 @@ for numFeat in range(2, goodRegionFeatures.shape[1]):
     confidenceWidths.append(confidenceWidth)
     models.append(bestModel)
     scores.append(score)
-    print(f"95% Confidence Width: {confidenceWidth}")
 
 scoreMaxIdx = np.argmax(scores)
+
 bestSupport = supports[scoreMaxIdx]
 bestModel = models[scoreMaxIdx]
 confidenceWidth = confidenceWidths[scoreMaxIdx]
 
 #Plot all the scores using a darkmode plot
 fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZHRO")
-fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
 fig.show()
 
 print("###### Final Results ######")
@@ -1592,7 +1578,7 @@ models = []
 supports = []
 confidenceWidths = []
 for numFeat in range(2, goodRegionFeatures.shape[1]):
-    print(f"--------Testing {numFeat} features--------")
+    #print(f"--------Testing {numFeat} features--------")
     rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
     rfe.fit(goodRegionFeatures, goodRegionTargets)
     support = rfe.get_support()
@@ -1604,7 +1590,7 @@ for numFeat in range(2, goodRegionFeatures.shape[1]):
     confidenceWidths.append(confidenceWidth)
     models.append(bestModel)
     scores.append(score)
-    print(f"95% Confidence Width: {confidenceWidth}")
+    #print(f"95% Confidence Width: {confidenceWidth}")
 
 scoreMaxIdx = np.argmax(scores)
 bestSupport = supports[scoreMaxIdx]
@@ -1613,7 +1599,7 @@ confidenceWidth = confidenceWidths[scoreMaxIdx]
 
 #Plot all the scores using a darkmode plot
 fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZPFW")
-fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
 fig.show()
 
 print("###### Final Results ######")
@@ -1660,7 +1646,7 @@ models = []
 supports = []    
 confidenceWidths = []
 for numFeat in range(2, goodRegionFeatures.shape[1]):
-    print(f"--------Testing {numFeat} features--------")
+    #print(f"--------Testing {numFeat} features--------")
     rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
     rfe.fit(goodRegionFeatures, goodRegionTargets)
     support = rfe.get_support()
@@ -1672,7 +1658,7 @@ for numFeat in range(2, goodRegionFeatures.shape[1]):
     confidenceWidths.append(confidenceWidth)
     models.append(bestModel)
     scores.append(score)
-    print(f"95% Confidence Width: {confidenceWidth}")
+    #print(f"95% Confidence Width: {confidenceWidth}")
 
 scoreMaxIdx = np.argmax(scores)
 bestSupport = supports[scoreMaxIdx]
@@ -1681,7 +1667,7 @@ confidenceWidth = confidenceWidths[scoreMaxIdx]
 
 #Plot all the scores using a darkmode plot
 fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZTBN")
-fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
 fig.show()
 
 print("###### Final Results ######")
@@ -1720,7 +1706,7 @@ models = []
 supports = []    
 confidenceWidths = []
 for numFeat in range(2, goodRegionFeatures.shape[1]):
-    print(f"--------Testing {numFeat} features--------")
+    #print(f"--------Testing {numFeat} features--------")
     rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
     rfe.fit(goodRegionFeatures, goodRegionTargets)
     support = rfe.get_support()
@@ -1732,7 +1718,7 @@ for numFeat in range(2, goodRegionFeatures.shape[1]):
     confidenceWidths.append(confidenceWidth)
     models.append(bestModel)
     scores.append(score)
-    print(f"95% Confidence Width: {confidenceWidth}")
+    #print(f"95% Confidence Width: {confidenceWidth}")
 
 scoreMaxIdx = np.argmax(scores)
 bestSupport = supports[scoreMaxIdx]
@@ -1741,7 +1727,7 @@ confidenceWidth = confidenceWidths[scoreMaxIdx]
 
 #Plot all the scores using a darkmode plot
 fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZSTL")
-fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores")
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")
 fig.show()
 
 print("###### Final Results ######")
@@ -1778,7 +1764,7 @@ models = []
 supports = []    
 confidenceWidths = []
 for numFeat in range(2, goodRegionFeatures.shape[1]):
-    print(f"--------Testing {numFeat} features--------")
+    #print(f"--------Testing {numFeat} features--------")
     rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
     rfe.fit(goodRegionFeatures, goodRegionTargets)
     support = rfe.get_support()
@@ -1790,7 +1776,7 @@ for numFeat in range(2, goodRegionFeatures.shape[1]):
     confidenceWidths.append(confidenceWidth)
     models.append(bestModel)
     scores.append(score)
-    print(f"95% Confidence Width: {confidenceWidth}")
+    #print(f"95% Confidence Width: {confidenceWidth}")
 
 scoreMaxIdx = np.argmax(scores)
 bestSupport = supports[scoreMaxIdx]
@@ -1799,7 +1785,7 @@ confidenceWidth = confidenceWidths[scoreMaxIdx]
 
 #Plot all the scores using a darkmode plot    
 fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for ZBRC")    
-fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
 fig.show()
 
 print("###### Final Results ######")
@@ -1836,7 +1822,7 @@ models = []
 supports = []    
 confidenceWidths = []
 for numFeat in range(2, goodRegionFeatures.shape[1]):
-    print(f"--------Testing {numFeat} features--------")
+    #print(f"--------Testing {numFeat} features--------")
     rfe = RFE(sklearn.linear_model.LinearRegression(), n_features_to_select=numFeat)
     rfe.fit(goodRegionFeatures, goodRegionTargets)
     support = rfe.get_support()
@@ -1848,7 +1834,7 @@ for numFeat in range(2, goodRegionFeatures.shape[1]):
     confidenceWidths.append(confidenceWidth)
     models.append(bestModel)
     scores.append(score)
-    print(f"95% Confidence Width: {confidenceWidth}")
+    #print(f"95% Confidence Width: {confidenceWidth}")
 
 scoreMaxIdx = np.argmax(scores)
 bestSupport = supports[scoreMaxIdx]
@@ -1857,7 +1843,7 @@ confidenceWidth = confidenceWidths[scoreMaxIdx]
 
 #Plot all the scores using a darkmode plot    
 fig = px.line(x=np.arange(2, goodRegionFeatures.shape[1]), y=scores, title="Plot of R\u00b2 Scores vs Features for RCTZ")    
-fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores")    
+fig.update_layout(template="plotly_dark", xaxis_title="# Features", yaxis_title="R\u00b2 Scores", hovermode="x unified")    
 fig.show()
 
 print("###### Final Results ######")
