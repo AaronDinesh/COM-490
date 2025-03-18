@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.11.2
+#       jupytext_version: 1.16.6
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -226,6 +226,7 @@ print(co2_resampled.dtypes)
 co2_resampled
 
 # %%
+# Problem: some sensor start later or stop earlier
 # Define the expected time range and create a common 30-minute interval index
 expected_start = pd.Timestamp("2017-10-01 00:00:00")
 expected_end = pd.Timestamp("2017-10-31 23:30:00")
@@ -291,15 +292,13 @@ co2_resampled_fixed = co2_resampled_fixed.sort_values(["SensorUnit_ID", "timesta
 print("Final shape after fixing:", co2_resampled_fixed.shape)
 print("\nMissing values after fixing:")
 print(co2_resampled_fixed.isnull().sum())
-'''sensor_id_to_check = 1117
-print(f"\nSample data for sensor {sensor_id_to_check}:")
-print(co2_resampled_fixed[co2_resampled_fixed["SensorUnit_ID"] == sensor_id_to_check].head(20))
-co2_resampled_fixed'''
 
 # %%
+# Look between 35711 and 35712
 co2_resampled[35709:35715]
 
 # %%
+# Look between 35711 and 35712
 co2_resampled_fixed[35709:35715]
 
 # %% [markdown]
@@ -342,12 +341,11 @@ temp_hum_resampled = temp_hum_pivot.groupby('SensorUnit_ID').resample('30min').a
     'temperature': 'mean',
 }).reset_index()
 
-# what's best: int or str?
 temp_hum_resampled['SensorUnit_ID'] = temp_hum_resampled['SensorUnit_ID'].astype(int)
 
 # %%
 # Check temp_hum_resampled
-print("Missing values temp_hum_resampled:")
+print("Missing values after cleaning, temp_hum_resampled:")
 print(temp_hum_resampled.isnull().sum())
 print(temp_hum_resampled.dtypes)
 # display the head of the cleaned DataFrame
@@ -453,7 +451,7 @@ print(f"\nOptimal number of clusters: {optimal_k}\nDistortion score: {distortion
 # - $\mu_i$ is the **centroid** of the $i^\text{th}$ cluster.
 # - $x$ is a **data point** in cluster $C_i$.
 #
-# A **lower distortion score** means points lie **closer to their centroid**, reflecting **more compact clusters**. While the **lowest** distortion occurs when each point is its own cluster, that choice would be **overly complex**. So a good trade-off aims to reduce distortion and complexity (low k).
+# A **lower distortion score** means points lie **closer to their centroid**, reflecting **more compact clusters**. While the **lowest** distortion occurs when each point is its own cluster, that choice would be **overly complex**. So a good trade-off aims to reduce distortion **and** complexity (low k).
 
 # %% [markdown]
 # ### Perform K-Means with optimal k value and add the altitude cluster indexes to the DataFrame with all measurments
@@ -507,12 +505,12 @@ for cluster_id, row in altitude_stats.iterrows():
     # Filter rows belonging to the current cluster
     cluster_slice = merged_df_clustered[merged_df_clustered['altitude_cluster'] == cluster_id]
     
-    # Count unique sensors (use 'LocationName' or 'SensorUnit_ID', whichever identifies a sensor uniquely)
+    # Count unique sensors ('LocationName' or 'SensorUnit_ID', whichever identifies a sensor uniquely)
     unique_sensors = cluster_slice['SensorUnit_ID'].nunique()
     
     print(
         f"  Cluster {cluster_id}: "
-        f"Range = {row['min']:.2f} - {row['max']:.2f}, "
+        f"Range = [{row['min']:.2f}, {row['max']:.2f}] "
         f"Mean = {row['mean']:.2f}, "
         f"Count = {int(row['count'])}, "
         f"Unique Sensors = {unique_sensors}"
@@ -547,7 +545,7 @@ plot_df = pd.merge(monthly_median_co2, unique_locations, on='LocationName', how=
 # Convert altitude_cluster to string for discrete color mapping
 plot_df['altitude_cluster'] = plot_df['altitude_cluster'].astype(str)
 
-# Check for missing median_CO2 values and print info (do not drop them)
+# Check for missing median_CO2 values and print info
 print(f"Missing values: {plot_df['median_CO2'].isnull().sum()}")
 
 # Create an interactive Plotly scatter plot
@@ -606,7 +604,7 @@ fig = px.density_mapbox(
     lon='lon',
     z='mean_daily_CO2',
     animation_frame='timestamp',
-    center=dict(lat=center_lat, lon=center_lon),  # or pick specific numbers
+    center=dict(lat=center_lat, lon=center_lon), 
     color_continuous_scale="Viridis",
     range_color=[min_value, max_value],
     hover_data={'LocationName': True, 'mean_daily_CO2': True, 'lat': True, 'lon': True},
@@ -637,8 +635,7 @@ end_date   = "2017-10-25"
 # Filter the merged DataFrame for that window
 df_drift = merged_df_clustered.loc[start_date:end_date].copy()
 
-# Select sensors of interest 'ZSBN', and pick a few others (like 'ZGHD', 'ZORL') for comparison
-#ZHRO is geographically close. BUDF has a similar mean CO2 level to ZSBN
+# Select sensors of interest 'ZSBN', and pick a few others ("ZHRO", "BUDF" , "ZORL") for comparison
 sensors_of_interest = ["ZSBN", "ZHRO", "BUDF" , "ZORL"]
 df_drift = df_drift[df_drift["LocationName"].isin(sensors_of_interest)]
 
@@ -672,7 +669,7 @@ fig.show()
 # - What do you observe? Report your findings.
 #
 # ### Answer
-# I notice that the linear regression model acurately captures the periodic nature of the CO2 levels and also corrects for the sensor drift that is observed. However it seems to be too smooth and cant accuratly capture the "spiky-ness" in the CO2 measurements. I think this can be corrected by the introduction of some periodic non-linear high frequency features.
+# I notice that the linear regression model acurately captures the periodic nature of the CO2 levels and also corrects for the sensor drift that is observed. However it seems to be too smooth and can't accuratly capture the "spiky-ness" in the CO2 measurements. I think this can be corrected by the introduction of some periodic non-linear high frequency features.
 #
 #
 # __Note:__ Cross validation on time series is different from that on other kinds of datasets. The following diagram illustrates the series of training sets (in orange) and validation sets (in blue). For more on time series cross validation, there are a lot of interesting articles available online. scikit-learn provides a nice method [`sklearn.model_selection.TimeSeriesSplit`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html).
