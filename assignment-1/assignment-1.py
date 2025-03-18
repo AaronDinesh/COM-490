@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.6
+#       jupytext_version: 1.11.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -617,8 +617,9 @@ fig.update_layout(
     width=1200,
     xaxis_title='Longitude',
     yaxis_title='Latitude',
-    title='Daily mean CO2 [ppm] density over Zurich'),
+    title='Daily mean CO2 [ppm] density over Zurich',
     template='plotly_dark'
+)
 fig.show()
 
 # %% [markdown]
@@ -801,6 +802,8 @@ fig.show()
 # 2) When fitting the regression data from "similar" sensors were used. In this case we choose the $N$-closest sensors to the sensor of choice that wasn't in the anomalous set we described above. The distance was calculated using the lat-lon coordinates and the Haversine distance formula.
 #
 # 3) For features I choose the temperature and humidity and then various frequency components based on the hour, minute and day of the timestamp (this is to allow for periodic trends). These features were expanded using a polynomial regression with degree 2 (this also adds a bias term). I also included the altitude and lat-lon coordinates.
+#
+# 4) We also noticed that for some sensors the linear regression provided a very poor fit and sometimes yielded a negative $R^2$ score. So in order to fix them we assumed that an exponential moving average model would provide a better fit.
 
 # %%
 # Performing two types of filtering on the data to detect drift.
@@ -1580,6 +1583,10 @@ plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets)
 # \end{align*}
 # $$
 # This measures the reduction in the uncertainty of $Y$ given that we know $X$. First the method estimates the probability distribution of $X$ and $Y$. Then using the fomula above we can compute the Mutual Information between the features and the target. The features with the highest Mutual Information scores are selected. The ones with scores close to 0 can be dropped as they provide very little information about the target. This method has the benefit of working for both linear and non-linear models. We then iteratively compute the $R^2$ scores for increasing number of features until the best model is found.
+#
+# We noticed that this method allowed us to drastically reduce the number of features needed to model some of the sites. However this method didn't work well on sites that had extremely irregular data such was (WMOO). The data in these sites had seemingly random out of the ordinary peaks that would last for an hour. This made the Mutual Information method less effective. Showing that this method could be sensitive to large outliers in the data.
+#
+# One other thing that was interesting to note is that, in most of the cases the Mutual Information method decided to keep some of the sinusoidal encoding of the time features in the final model. Meaning that these encodings provide a lot of information on the $CO_2$ levels. This highlights the importance of the time of day and the day itself in modelling $CO_2$ levels
 
 # %%
 def doCrossValidationWithScore(goodRegionFeatures, timestampsForGoodRegion, targets, polynomalDegree=2):
@@ -2382,6 +2389,8 @@ plotWithConfidence(pd.date_range(start=start_date, periods=len(regressedTargets)
 # The RFE algorithm perform iterative line fits on the data and drops the least important features. "Importance" in the case of a linear model is determined by its respective coefficient. RFE keeps dropping the least important features until the desired number of features are reached.
 #
 # We then iterativly performed RFE on the features we had selected and augmented in question c), allowing fewer and fewer features to be dropped each iteration. For each of these iterations we computed the $R^2$ score of the resulting model. The features that maximised the $R^2$ score were selected. In some cases this showed a dramatic imporvement. For example take the ZTBN site, RFE allowed us to drop the feature count from 93 down to 8.
+#
+# It should also be noted that RFE faired much better than the mutual information method on sites where there were large outliers in the data such as WMOO. Meaning that if there are large outliers in the data, this method could be more effective. Also for most if not all of the sites, the RFE method decided to keep some of the sinusoidal encodings of the time features in the final model. This highlights the importance of the time of day and the day itself in modelling $CO_2$ levels
 
 # %%
 #Fixing ZHRO
