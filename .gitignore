@@ -1,0 +1,7 @@
+*.csv
+*.zip
+*.orc
+*.parquet
+*.feather
+.ipynb_checkpoints
+*.pyc
