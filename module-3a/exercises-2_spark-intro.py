@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     custom_cell_magics: kql
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.6
+#       jupytext_version: 1.11.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -201,7 +202,7 @@ composite.count()
 # ----
 # ## Key, value pair RDDs
 #
-# `key`,`value` pair data is the "bread and butter" of map/reduce programming. Think of the `value` part as the meat of your data and the `key` part as some crucial metadata. For example, you might have time-series data for CO$_2$ concentration by geographic location: the `key` might be the coordinates or a time window, and `value` the CO$_2$ data itself. 
+# `key`,`value` pair data is the "bread and butter" of map/reduce programming. Think of the `value` part as the meat of your data and the `key` part as some crucial metadata. For example, you might have time-series data for $CO_2$ concentration by geographic location: the `key` might be the coordinates or a time window, and `value` the $CO_2$ data itself. 
 #
 # If your data can be expressed in this way, then the map/reduce computation model can be very convenient for pre-processing, cleaning, selecting, filtering, and finally analyzing your data. 
 #
@@ -269,7 +270,3 @@ assert(sorted_red == [(4, 1030), (3, 1010), (2, 990), (1, 970), (0, 950)])
 
 # %%
 sc.stop()
-
-# %%
-
-# %%
