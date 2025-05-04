@@ -2,11 +2,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     custom_cell_magics: kql
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.6
+#       jupytext_version: 1.11.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -178,12 +179,34 @@ spark.sql(f'SELECT * FROM iceberg.sbb.istdaten LIMIT 1').show(truncate=False,ver
 
 # %%
 # %%time
+"""
+This reads in the weather station csv and then creates a spark dataframe. This is then chained with the 
+.withColumns() method to cast the lat and lon columns to double. Finally we register it as a temporary SQL
+table called 'weather_stations'. This will only last for the lifetime of the current spark session (until 
+you call spark.stop()).
+
+Note there are other columns in this CSV, but we only explictly cast lat and lon to doubles. The rest will
+remain as strings.
+"""
+
 spark.read.options(header=True).csv(f'/data/com-490/csv/weather_stations').withColumns({
       'lat': F.col('lat').cast('double'),
       'lon': F.col('lon').cast('double'),
     }).createOrReplaceTempView("weather_stations")
 
 # %%
+"""
+Table Schema
+root
+ |-- Name: string (nullable = true)
+ |-- City: string (nullable = true)
+ |-- Canton: string (nullable = true)
+ |-- ID: string (nullable = true)
+ |-- Active: string (nullable = true)
+ |-- lat: double (nullable = true)
+ |-- lon: double (nullable = true)
+"""
+
 spark.sql(f'SELECT * FROM weather_stations').printSchema()
 
 # %%
@@ -256,7 +279,9 @@ weather_raw = spark.read.option("multiline", "true").json("/data/com-490/json/we
 weather_raw.printSchema()
 
 # %%
-# exploding observations 
+# exploding observations
+# explode "observations" will return a new row for each element in the given array 
+ 
 weather_df = weather_raw.select(
     "metadata",
     "site",
@@ -272,7 +297,10 @@ weather_df = weather_df.withColumn("year", year(from_unixtime("observation.valid
 weather_df = weather_df.withColumn("month",month(from_unixtime("observation.valid_time_gmt")))
 
 # %%
-# just checking if it matches the structure that was asked for 
+# just checking if it matches the structure that was asked for
+# 
+# notice how it was observation->element->* but then after exploding it is observation->*
+#  
 weather_df.printSchema()
 
 # %% [markdown]
@@ -379,6 +407,7 @@ weather_df = weather_df.withColumn("observation_time_tz", F.from_unixtime(F.col(
 
 # %%
 # taking year, month, day, hour, and minute from the datetime column
+# the .withColumn() method is used to add a new column to the DataFrame
 weather_df = weather_df.withColumn("year", F.year("observation_time_tz"))
 weather_df = weather_df.withColumn("month", F.month("observation_time_tz"))
 weather_df = weather_df.withColumn("dayofmonth", F.dayofmonth("observation_time_tz"))
@@ -447,6 +476,7 @@ dst_autumn.select(
 
 
 # %% [markdown]
+# <font color="#7777ff">
 # Luckily, the transitions seem to be pretty accurate with the observation_time_tz entry. 
 
 # %% [markdown]
@@ -497,13 +527,23 @@ dst_autumn.select(
 
 # %%
 # what years are full
+
+"""
+We first group all the entries by year. Then we count the distint pairs of month and days of that month.
+We give the result from this counting operation the name 'num_days'. Then we aggregate the data to count over
+the the distinct (month, dayofmonth) pairs and then order it in chronological order of the year and then print the result.
+"""
+
+
 from pyspark.sql.functions import countDistinct
 weather_df.groupBy("year").agg(
     countDistinct("month", "dayofmonth").alias("num_days")
 ).orderBy("year").show()
 
 # %% [markdown]
+# <span style="color:red">
 # Okay so we see that 2022, 2023, and 2024 are full years! Also, 2024 is a leap year :)
+# </span>
 
 # %%
 # %%time
@@ -750,7 +790,11 @@ top_sites_per_hour_sorted = top_sites_per_hour.orderBy("year", "month", "dayofmo
 top_sites_per_hour_sorted.select("site", "year", "month", "dayofmonth", "hour", "temp", "rank").show(5,truncate=False)
 
 # %% [markdown]
-# So we notice how the biggest difference between our result and the exemplary one is that our data includes the year 2022, while the exemplary data shows 2023. Howver, according to Part 1C of the question, the years 2022, 2023, and 2024 are all considered full years. Therefore, I believe our result is still valid, as the question does not specifically exclude the year 2022.
+# <font color="#7777ff">
+# So we notice how the biggest difference between our result and the exemplary one is that our data includes the year
+# 2022, while the exemplary data shows 2023. However, according to Part 1C of the question, the years 2022, 2023, and 2024
+# are all considered full years. Therefore, I believe our result is still valid, as the question does not specifically
+# exclude the year 2022.
 
 # %% [markdown]
 # ### I.f Sliding Spark Windows - 4/20
@@ -825,7 +869,8 @@ weather_filtered = weather_df_with_avg.filter(F.col("site").isin(selected_sites)
 weather_filtered.orderBy("valid_time_gmt").show(10)
 
 # %% [markdown]
-# seems like a passed checkpoint!
+# <font color="#7777ff">
+# Seems like a passed checkpoint!
 
 # %%
 # TODO -- apply the sliding_3hour_avg logic, showing ony the results for the site in LSGG","LSGP","LSGL","LSTR","LSGB"
@@ -878,9 +923,11 @@ weather_df \
     .show()
 
 # %% [markdown]
+# <font color="#7777ff">
+#
 # In my understanding, when a site has rank 1, it means it had the highest 3-hour average temperature among all sites for that specific hour.
 #
-# Interestingly though, I do not see rank 3 anywhere. Apparently, there’s no rank 3 because rank() skips ranks after ties. So if two sites tie at rank 2 (which happens often in our table), the next is rank 4.
+# Interestingly though, I do not see rank 3 anywhere. Apparently, there’s no rank 3 because rank() skips ranks after ties. So if two sites tie at rank 2 (which often happens in our table), the next is rank 4.
 
 # %% [markdown]
 # ---
@@ -1223,12 +1270,6 @@ trip_sequences_df.createOrReplaceTempView('trip_sequences_df')
 #
 # We did this analysis for you and we suggest that you to focus your analysis on valid and reliable trip patterns, such as _trip_id='85:151:TL031-4506262507505612'_ for the rest of this study.
 
-# %%
-
-# %%
-
-# %%
-
 # %% [markdown]
 # Consider only _trip_id='85:151:TL031-4506262507505612'_.
 #
@@ -1431,7 +1472,7 @@ planned_df.filter("sequence=1").groupBy("evt_type").agg(F.col("evt_type"),F.min(
 actual_df.filter("sequence=1").groupBy("evt_type").agg(F.col("evt_type"),F.min("evt_time"),F.max("evt_time")).show(truncate=False)
 
 # %%
-trips_pivoted_df.toPandas().drop(columns=['bpuic','evt_type']).plot(x='sequence',legend=False)
+trips_pivoted_df.toPandas().drop(columns=['bpuic','evt_type']).plot(x='sequence',legend=False, )
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
 # ---
@@ -1532,5 +1573,3 @@ trips_pivoted_df.toPandas().drop(columns=['bpuic','evt_type']).plot(x='sequence'
 
 # %%
 spark.stop()
-
-# %%
