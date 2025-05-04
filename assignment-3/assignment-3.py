@@ -956,7 +956,7 @@ weather_df \
 # The table must:
 # - Only include the ids of _distinct_ trip that appear on at least 200 different days in _isdaten_ in _2024_
 # - Only trips from the Transport Lausanne (TL) operator.
-# - Onyl trip ids that serve stops in the Lausanne region.
+# - Only trip ids that serve stops in the Lausanne region.
 #     - Use the data available in _/data/com-490/labs/assignment-3/sbb_stops_lausanne_region.parquet_)
 #     - Or use Trino to create your own list of stops in the greater Lausanne region (Lausanne and Ouest Lausannois).
 #
@@ -1033,6 +1033,10 @@ istdaten_trips_df.count()
 
 # %%
 # %%time
+
+"""
+istdaten_trips_df contains all the trip_ids that have at least 200 days of data in 2024
+"""
 istdaten_trips_df.show(10, truncate=False)
 
 # %% [markdown]
@@ -1515,13 +1519,162 @@ trips_pivoted_df.toPandas().drop(columns=['bpuic','evt_type']).plot(x='sequence'
 #
 
 # %%
+"""
+First we need to do an intersection between tl_laussanne_df and istdaten_trips_df. This allows us to get all the data
+for trips in the Lausanne area provided by the TL operator that have more than 200 rows of data (actual trips completed)
+in 2024. This inner join will be called 'raw_trip_data_df'
+"""
+
+raw_trip_data_df = tl_lausanne_df.join(
+    istdaten_trips_df,
+    on="trip_id",
+    how="inner"
+).cache()
+
+raw_trip_data_df.createOrReplaceTempView("raw_trip_data_df")
+raw_trip_data_df.show(5, truncate=False)
+
+ # %%
+ #TODO: Delete
+raw_trip_data_df.printSchema()
+
+ # %%
+ #TODO: Delete
+spark.table("weather_stations").filter(F.col("Active") == "False").show(5, truncate=False)
+
+# %%
+"""
+Now that we have all the trips in the lausanne area with more than 200 rows of data, we need to do a join between
+raw_trip_data_df and weather_df based on the stop latitude, stop longitude, and the departure time. This will then
+provide all the stop data as well as the weather data. Weather_df has a sampling rate of 30mins at each location.
+"""
+from pyspark.sql.functions import radians, sin, cos, atan2, sqrt, lit #Used in calculating haversine distance
+from collections import OrderedDict #for deduping columns
+from pyspark.sql.window import Window
+from pyspark.sql.functions import abs, unix_timestamp, row_number #Used in calculating the closest weather station timestamp
+
+EARTH_RADIUS = 6371.0  # Earth's radius in kilometers
+
+
+#This will create a new dataframe with the cartesian product of all the stops in raw_trip_data_df and all the weather
+#stations that are active and also have latitude and longitude coord that is not Null
+stop_weatherStation_pairs_df = raw_trip_data_df.select("bpuic", "stop_lat", "stop_lon").distinct().crossJoin(
+    spark.table("weather_stations").select("Name", "lat", "lon").filter((F.col("Active") == "True") & (F.col("lat").isNotNull()) & (F.col("lon").isNotNull()))
+)
+
+#Now we calculate the haversine distance between each stop and each weather station. We use arctan2 rather than arcsine
+#for numerical stability
+stop_weatherStation_distance_df = stop_weatherStation_pairs_df.withColumn(
+    "delta_lat", radians(F.col("stop_lat") - F.col("lat")) #Calculates the difference between stop_lat and lat in radians
+).withColumn(
+    "delta_lon", radians(F.col("stop_lon") - F.col("lon")) #Calculates the difference between stop_lon and lon in radians
+).withColumn(
+    "a", sin(col("delta_lat")/2)**2 + cos(radians(col("stop_lat"))) * cos(radians(col("lat"))) * sin(col("delta_lon")/2)**2
+).withColumn(
+    "c", 2 * atan2(sqrt(col("a")), sqrt(1-col("a")))
+).withColumn(
+    "distance", lit(EARTH_RADIUS) * col("c")
+)
+
+#Now we can select the closest weather station for each stop
+nearest_weatherStation_df = stop_weatherStation_distance_df.withColumn(
+    "rank", F.row_number().over(Window.partitionBy("bpuic").orderBy("distance"))
+).filter(F.col("rank") == 1).select("bpuic", "Name")
+
+stop_weatherStation_distance_df.filter(F.col("bpuic") == "8501207").sort(F.asc("distance")).show(10, truncate=False)
+nearest_weatherStation_df.show(5, truncate=False)
+
+
+"""
+Now that we have the closest weather station for each stop in nearest_weatherStation_df, we need to join
+raw_trip_data_df and nearest_weatherStation_df on bpuic. Then after this we have to align the weather data with the
+departure times of each trip.
+"""
+#This has now joined up every BPUIC with its nearest weather station in one dataframe
+raw_trip_data_with_weatherStation_df = raw_trip_data_df.join(
+    nearest_weatherStation_df.withColumnRenamed("Name", "weather_station"),
+    on="bpuic",
+    how="left"
+)
+
+weatherStation_with_unixTime_df = weather_df.select(
+    F.col("site"),
+    F.col("valid_time_gmt"),
+)
+
+
+raw_trip_data_with_weatherStation_df.show(5, truncate=False)
+raw_trip_data_df_cols = raw_trip_data_df.columns
+deduped_cols = list(OrderedDict.fromkeys(raw_trip_data_df_cols)
+
+raw_trip_data_with_weatherStation_df = raw_trip_data_with_weatherStation_df.select(deduped_cols)
+
+raw_trip_data_with_weatherStation_df = raw_trip_data_with_weatherStation_df.withColumn("dep_time_unix", F.unix_timestamp("dep_time")) 
+
+
+
+# %%
+#Find out how many null values there are in istdaten_df in the dep_actual and dep_time columns 
+"""
+There should be around these many null values in istdaten_df in the dep_actual and dep_time columns
++----------+-------------+---------------+
+|total_rows|null_dep_time|null_dep_actual|
++----------+-------------+---------------+
+|   3336621|       264198|         264722|
++----------+-------------+---------------+
+"""
+
+istdaten_df.select(
+    F.count("*").alias("total_rows"),
+    F.sum(F.col("dep_time").isNull().cast("int")).alias("null_dep_time"),
+    F.sum(F.col("dep_actual").isNull().cast("int")).alias("null_dep_actual")
+).show()
+
+print("Dropping the rows with null values in dep_time or dep_actual...")
+
+istdaten_df = istdaten_df.filter(F.col("dep_time").isNotNull() & F.col("dep_actual").isNotNull())
+
+print("Finished dropping the rows with null values in dep_time or dep_actual")
+
+istdaten_df.select(
+    F.count("*").alias("total_rows"),
+    F.sum(F.col("dep_time").isNull().cast("int")).alias("null_dep_time"),
+    F.sum(F.col("dep_actual").isNull().cast("int")).alias("null_dep_actual")
+).show()
+
+# %%
 # TODO ...
 
-# %%
+from pyspark.sql.functions import unix_timestamp
+
+
+#Calculate the delays between the planned departure and the actual departure and store it in the column "delay"
+#Note with this convention you can have negative delays, this just means the train left early.
+istdaten_df = istdaten_df.withColumn("delay", unix_timestamp("dep_actual") - unix_timestamp("dep_time"))
+istdaten_df.show(5, truncate=False)
 
 # %%
+#Use the delay column to calculate all delays over 5 minutes. Store it as a binary value.
+
+"""
+Output showing this works..
++-------------+-----------------------------+-------+-------------------+-------------------+-------------------+-------------------+-----+----------------+
+|operating_day|trip_id                      |bpuic  |arr_time           |arr_actual         |dep_time           |dep_actual         |delay|delay_over_5_min|
++-------------+-----------------------------+-------+-------------------+-------------------+-------------------+-------------------+-----+----------------+
+|2024-08-29   |85:151:TL013-4506262507243800|8579254|2024-08-29 12:22:00|2024-08-29 12:28:11|2024-08-29 12:22:00|2024-08-29 12:28:11|371  |1               |
+|2024-08-29   |85:151:TL013-4506262507243800|8592009|2024-08-29 12:27:00|2024-08-29 12:33:49|2024-08-29 12:27:00|2024-08-29 12:35:17|497  |1               |
++-------------+-----------------------------+-------+-------------------+-------------------+-------------------+-------------------+-----+----------------+
+"""
+istdaten_df = istdaten_df.withColumn("delay_over_5_min", F.when(F.col("delay") > 300, 1).otherwise(0))
+istdaten_df.show(5, truncate=False)
 
 # %%
+#Find out how many null values there are in all the other columns in istdaten_df
+null_counts = istdaten_df.select([
+    F.sum(F.col(c).isNull().cast("int")).alias(c) for c in istdaten_df.columns
+])
+
+null_counts.show()
 
 # %% [markdown]
 # ### III.b Model building - 6/20
