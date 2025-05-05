@@ -1520,27 +1520,61 @@ trips_pivoted_df.toPandas().drop(columns=['bpuic','evt_type']).plot(x='sequence'
 
 # %%
 """
-First we need to do an intersection between tl_laussanne_df and istdaten_trips_df. This allows us to get all the data
-for trips in the Lausanne area provided by the TL operator that have more than 200 rows of data (actual trips completed)
-in 2024. This inner join will be called 'raw_trip_data_df'
+This code cell creates a new spark df of all the trips by TL in the lausanne region. The code also performs some basic
+data cleaning and filtering to ensure that only planned, successful trips with non-null arrival times and departure
+times are inlcuded.
 """
 
-raw_trip_data_df = tl_lausanne_df.join(
-    istdaten_trips_df,
-    on="trip_id",
-    how="inner"
-).cache()
+raw_tl_df = (spark.table("iceberg.sbb.istdaten")).filter(F.col("operator_abrv") == "TL")
+raw_tl_df.createOrReplaceTempView("raw_tl_df")
+print("Showing raw_tl_df and its schema...")
+raw_tl_df.show(5, truncate=False)
+raw_tl_df.printSchema()
+
+print("Show lausanne_stops_df and its schema...")
+lausanne_stops_df.show(5, truncate=False)
+lausanne_stops_df.printSchema()
+
+raw_trip_data_df = raw_tl_df.alias("raw_tl_df").join(
+    lausanne_stops_df.alias("lausanne_stops_df"),     
+    raw_tl_df.bpuic == lausanne_stops_df.stop_id, 
+    how="inner").select(
+        "raw_tl_df.operating_day",
+        "raw_tl_df.trip_id",
+        "raw_tl_df.operator_id",
+        "raw_tl_df.operator_abrv",
+        "raw_tl_df.operator_name",
+        "raw_tl_df.product_id",
+        "raw_tl_df.line_id",
+        "raw_tl_df.line_text",
+        "raw_tl_df.circuit_id",
+        "raw_tl_df.transport",
+        "raw_tl_df.unplanned",
+        "raw_tl_df.failed",
+        "raw_tl_df.bpuic",
+        "raw_tl_df.stop_name",
+        "raw_tl_df.arr_time",
+        "raw_tl_df.arr_actual",
+        "raw_tl_df.arr_status",
+        "raw_tl_df.dep_time",
+        "raw_tl_df.dep_actual",
+        "raw_tl_df.dep_status",
+        "raw_tl_df.transit",
+        "lausanne_stops_df.stop_lat",
+        "lausanne_stops_df.stop_lon"
+    ).withColumn("dep_time_unix", F.unix_timestamp("dep_time")).cache()
+
+print(f"Raw trip data count before basic filtering: {raw_trip_data_df.count()}")
+raw_trip_data_df = raw_trip_data_df.filter(
+    (F.col("unplanned") == False) & (F.col("failed") == False) &
+    (F.col("arr_time").isNotNull()) & (F.col("arr_actual").isNotNull()) & # Need these for delay calculation
+    (F.col("dep_time").isNotNull()) # Need this for weather joining
+)
+print(f"Raw trip data count after basic filtering: {raw_trip_data_df.count()}")
 
 raw_trip_data_df.createOrReplaceTempView("raw_trip_data_df")
 raw_trip_data_df.show(5, truncate=False)
-
- # %%
- #TODO: Delete
 raw_trip_data_df.printSchema()
-
- # %%
- #TODO: Delete
-spark.table("weather_stations").filter(F.col("Active") == "False").show(5, truncate=False)
 
 # %%
 """
@@ -1581,6 +1615,8 @@ nearest_weatherStation_df = stop_weatherStation_distance_df.withColumn(
     "rank", F.row_number().over(Window.partitionBy("bpuic").orderBy("distance"))
 ).filter(F.col("rank") == 1).select("bpuic", "Name")
 
+print("Identified nearest weather station for each stop..")
+print("Visual check that the closest weather station for each stop is correct..")
 stop_weatherStation_distance_df.filter(F.col("bpuic") == "8501207").sort(F.asc("distance")).show(10, truncate=False)
 nearest_weatherStation_df.show(5, truncate=False)
 
@@ -1597,84 +1633,58 @@ raw_trip_data_with_weatherStation_df = raw_trip_data_df.join(
     how="left"
 )
 
-weatherStation_with_unixTime_df = weather_df.select(
-    F.col("site"),
-    F.col("valid_time_gmt"),
+print("Showing that the closest weather station has been joined for each stop..")
+raw_trip_data_with_weatherStation_df.show(5, truncate=False)
+raw_trip_data_with_weatherStation_df.printSchema()
+
+weather_data_to_join = weather_df.select(
+    F.col("site").alias("weather_station_name"),
+    F.col("valid_time_gmt"), # Unix timestamp
+    "temp", "dewPt", "feels_like", "gust", "pressure", "rh", "vis", "wspd", "clds", "wx_phrase", "day_ind" # Weather features
+).filter(F.col("valid_time_gmt").isNotNull()) # Ensure weather timestamp exists
+
+# Join based on station name and a *broad* time window (e.g., +/- 1 hour)
+# We use dep_time_unix from trip_data_with_station
+potential_weather_matches_df = raw_trip_data_with_weatherStation_df.join(
+    weather_data_to_join,
+    on="weather_station_name",
+    how="left" # Keep trip even if weather is missing temporarily
+).where(
+    # Ensure weather reading is within +/- 1 hour (3600s) of planned departure
+    abs(F.col("dep_time_unix") - F.col("valid_time_gmt")) <= 3600
 )
 
+# Calculate the exact time difference
+potential_weather_matches_df = potential_weather_matches_df.withColumn(
+    "time_diff_weather_dep", abs(F.col("dep_time_unix") - F.col("valid_time_gmt"))
+)
 
-raw_trip_data_with_weatherStation_df.show(5, truncate=False)
-raw_trip_data_df_cols = raw_trip_data_df.columns
-deduped_cols = list(OrderedDict.fromkeys(raw_trip_data_df_cols)
+# Define a window partitioned by the unique trip stop event and ordered by time difference
+# Use operating_day, trip_id, bpuic, and dep_time as a unique key for the event
+closest_weather_window = Window.partitionBy(
+    "operating_day", "trip_id", "bpuic", "dep_time" # Use planned dep_time as part of the key
+).orderBy(F.asc("time_diff_weather_dep"))
 
-raw_trip_data_with_weatherStation_df = raw_trip_data_with_weatherStation_df.select(deduped_cols)
+# Add row number based on closeness in time
+ranked_weather_matches_df = potential_weather_matches_df.withColumn(
+    "weather_rank", F.row_number().over(closest_weather_window)
+)
 
-raw_trip_data_with_weatherStation_df = raw_trip_data_with_weatherStation_df.withColumn("dep_time_unix", F.unix_timestamp("dep_time")) 
+# Filter to keep only the closest weather reading (rank=1)
+final_trip_weather_df = ranked_weather_matches_df.filter(F.col("weather_rank") == 1).drop("weather_rank", "time_diff_weather_dep", "dep_time_unix", "valid_time_gmt")
 
+print(f"Trip data count after joining closest weather: {final_trip_weather_df.count()}")
+final_trip_weather_df.printSchema()
+final_trip_weather_df.show(5, truncate=False) # Verify join
 
 
 # %%
-#Find out how many null values there are in istdaten_df in the dep_actual and dep_time columns 
-"""
-There should be around these many null values in istdaten_df in the dep_actual and dep_time columns
-+----------+-------------+---------------+
-|total_rows|null_dep_time|null_dep_actual|
-+----------+-------------+---------------+
-|   3336621|       264198|         264722|
-+----------+-------------+---------------+
-"""
-
-istdaten_df.select(
-    F.count("*").alias("total_rows"),
-    F.sum(F.col("dep_time").isNull().cast("int")).alias("null_dep_time"),
-    F.sum(F.col("dep_actual").isNull().cast("int")).alias("null_dep_actual")
-).show()
-
-print("Dropping the rows with null values in dep_time or dep_actual...")
-
-istdaten_df = istdaten_df.filter(F.col("dep_time").isNotNull() & F.col("dep_actual").isNotNull())
-
-print("Finished dropping the rows with null values in dep_time or dep_actual")
-
-istdaten_df.select(
-    F.count("*").alias("total_rows"),
-    F.sum(F.col("dep_time").isNull().cast("int")).alias("null_dep_time"),
-    F.sum(F.col("dep_actual").isNull().cast("int")).alias("null_dep_actual")
-).show()
 
 # %%
-# TODO ...
-
-from pyspark.sql.functions import unix_timestamp
-
-
-#Calculate the delays between the planned departure and the actual departure and store it in the column "delay"
-#Note with this convention you can have negative delays, this just means the train left early.
-istdaten_df = istdaten_df.withColumn("delay", unix_timestamp("dep_actual") - unix_timestamp("dep_time"))
-istdaten_df.show(5, truncate=False)
 
 # %%
-#Use the delay column to calculate all delays over 5 minutes. Store it as a binary value.
-
-"""
-Output showing this works..
-+-------------+-----------------------------+-------+-------------------+-------------------+-------------------+-------------------+-----+----------------+
-|operating_day|trip_id                      |bpuic  |arr_time           |arr_actual         |dep_time           |dep_actual         |delay|delay_over_5_min|
-+-------------+-----------------------------+-------+-------------------+-------------------+-------------------+-------------------+-----+----------------+
-|2024-08-29   |85:151:TL013-4506262507243800|8579254|2024-08-29 12:22:00|2024-08-29 12:28:11|2024-08-29 12:22:00|2024-08-29 12:28:11|371  |1               |
-|2024-08-29   |85:151:TL013-4506262507243800|8592009|2024-08-29 12:27:00|2024-08-29 12:33:49|2024-08-29 12:27:00|2024-08-29 12:35:17|497  |1               |
-+-------------+-----------------------------+-------+-------------------+-------------------+-------------------+-------------------+-----+----------------+
-"""
-istdaten_df = istdaten_df.withColumn("delay_over_5_min", F.when(F.col("delay") > 300, 1).otherwise(0))
-istdaten_df.show(5, truncate=False)
 
 # %%
-#Find out how many null values there are in all the other columns in istdaten_df
-null_counts = istdaten_df.select([
-    F.sum(F.col(c).isNull().cast("int")).alias(c) for c in istdaten_df.columns
-])
-
-null_counts.show()
 
 # %% [markdown]
 # ### III.b Model building - 6/20
