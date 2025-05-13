@@ -2482,10 +2482,40 @@ print("-" * len(header))
 # for testing. This allows us to perform hyperparameter tuning while ensuring there is no data leakage (i.e. an instance
 # of the model will
 # never be tested on data that it was trained on). The testing set from the original will now be used as a validation set
-# to ensure there is no overfitting.
+# to ensure there is no overfitting. During our testing we found that this Cross Validation Step takes A very long time to
+# run. We noticed that it often took multiple hours to run, even after increasing the parallelism. Also, we noticed some
+# errors would often appear in the output box, where the spark context would complain about RDDs that do not exist
+# E.g. Error: `` Caused by: org.apache.spark.SparkException: Block rdd_1433_11 does not exist at
+# org.apache.spark.errors.SparkCoreErrors ...``. Once this happened we often had to restart the whole process, which meant
+# we didn't get much time to play around with the hyperparameters tuning. But the above 
 
 # %% [markdown]
+# <font color="#7777ff">
+#
 # ## Model Interpretation and Improvements for the Project
+#
+# When analysing the feature importance in the tree based methods we notice that the main feature used by both models is
+# the `line_text` feature ("line_text_index" in the Feature Importance cell above). This probably means that our model
+# discovered a trend in our data where certain lines are more likely to be delayed than others. Perhaps this could
+# correlate to busses that are frequently caught in rush hour traffic in the morning and in the evenings. This idea is
+# further reinforced when considering that the next most important feature is the `departure time` ("dep_time_index").
+# Meaning that if a mode of transport were to leave during the morning rush hour traffic time or during the evening rush
+# hour time, it would be more likely to be delayed than if it were to depart at another time. We also see that our model
+# pays significant attention to the `depature day of week` variable ("dep_dayofweek_index") which means that our model has
+# found a string dependency between trip delays and also which day of the week the trip was meant to happen. This again
+# makes sense since a trip is more likely to be delayed during weekdays rather than the weekend (due to the increased
+# volume of road traffic during weekdays), so the day of the week should play a role in determining whether a trip
+# is delayed. The WGBT model also found a dependence between the month the journey was supposed to occur and whether it
+# was going to be delayed. This connection was a bit harder to explain since there is no obvious connection between the
+# departure month and the delay. We think that this may be down to large scale events that happen during certain month
+# (such as Balélec) of it could be down to monthly trends such as a specific tourist season that increases the number of
+# rented cars and therefore traffic on the road. We also note that the weather features computed do not play a significant
+# part in deciding whether a delay will occur or not. We think that this might be due to the fact that the Lausanne area
+# might not experience extreme weather patters that would significantly delay some trips over 5 minutes. However, it is
+# important to note that the weather feature importance is not zero, for example features such as the temperature and
+# precipitation are still used when making the final decision, indicating that the weather features play a minor but not
+# insignificant role in decision making. While not included here, we think that perhaps adding some historical delay
+# statistics might help to improve the model even further. This idea will be explored in the final project.
 
 # %% [markdown]
 # # That's all, folks!
@@ -2494,5 +2524,3 @@ print("-" * len(header))
 
 # %%
 spark.stop()
-
-# %%
