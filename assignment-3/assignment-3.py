@@ -98,7 +98,7 @@ spark = SparkSession\
             .config('spark.sql.catalog.spark_catalog.warehouse', f'{hadoopFS}/user/{username}/assignment-3/warehouse')\
             .config("spark.sql.warehouse.dir", f'{hadoopFS}/user/{username}/assignment-3/spark/warehouse')\
             .config('spark.eventLog.gcMetrics.youngGenerationGarbageCollectors', 'G1 Young Generation')\
-            .config("spark.executor.memory", "6g")\
+            .config("spark.executor.memory", "10g")\
             .config("spark.executor.cores", "4")\
             .config("spark.executor.instances", "4")\
             .master('yarn')\
@@ -1582,75 +1582,64 @@ Now that we have all the trips in the lausanne area with more than 200 rows of d
 raw_trip_data_df and weather_df based on the stop latitude, stop longitude, and the departure time. This will then
 provide all the stop data as well as the weather data. Weather_df has a sampling rate of 30mins at each location.
 """
-from pyspark.sql.functions import radians, sin, cos, atan2, sqrt, lit #Used in calculating haversine distance
+from pyspark.sql.functions import radians, sin, cos, atan2, sqrt, lit, col #Used in calculating haversine distance
 from collections import OrderedDict #for deduping columns
 from pyspark.sql.window import Window
 from pyspark.sql.functions import abs, unix_timestamp, row_number #Used in calculating the closest weather station timestamp
 
-EARTH_RADIUS = 6371.0  # Earth's radius in kilometers
 
 
-#This will create a new dataframe with the cartesian product of all the stops in raw_trip_data_df and all the weather
-#stations that are active and also have latitude and longitude coord that is not Null
+EARTH_RADIUS = 6371.0
+
+print("Finding nearest weather stations...")
+weather_stations_active = spark.table("weather_stations").filter(
+    (F.col("Active") == "True") & (F.col("lat").isNotNull()) & (F.col("lon").isNotNull())
+).select(F.col("Name").alias("weather_station_name"), F.col("lat").alias("station_lat"), F.col("lon").alias("station_lon"))
+
 stop_weatherStation_pairs_df = raw_trip_data_df.select("bpuic", "stop_lat", "stop_lon").distinct().crossJoin(
-    spark.table("weather_stations").select("Name", "lat", "lon").filter((F.col("Active") == "True") & (F.col("lat").isNotNull()) & (F.col("lon").isNotNull()))
+    weather_stations_active
 )
 
-#Now we calculate the haversine distance between each stop and each weather station. We use arctan2 rather than arcsine
-#for numerical stability
 stop_weatherStation_distance_df = stop_weatherStation_pairs_df.withColumn(
-    "delta_lat", radians(F.col("stop_lat") - F.col("lat")) #Calculates the difference between stop_lat and lat in radians
+    "delta_lat", radians(col("stop_lat") - col("station_lat"))
 ).withColumn(
-    "delta_lon", radians(F.col("stop_lon") - F.col("lon")) #Calculates the difference between stop_lon and lon in radians
+    "delta_lon", radians(col("stop_lon") - col("station_lon"))
 ).withColumn(
-    "a", sin(col("delta_lat")/2)**2 + cos(radians(col("stop_lat"))) * cos(radians(col("lat"))) * sin(col("delta_lon")/2)**2
+    "a", sin(col("delta_lat")/2)**2 + cos(radians(col("stop_lat"))) * cos(radians(col("station_lat"))) * sin(col("delta_lon")/2)**2
 ).withColumn(
     "c", 2 * atan2(sqrt(col("a")), sqrt(1-col("a")))
 ).withColumn(
     "distance", lit(EARTH_RADIUS) * col("c")
 )
 
-#Now we can select the closest weather station for each stop
+nearest_station_window = Window.partitionBy("bpuic").orderBy(F.asc("distance"))
 nearest_weatherStation_df = stop_weatherStation_distance_df.withColumn(
-    "rank", F.row_number().over(Window.partitionBy("bpuic").orderBy("distance"))
-).filter(F.col("rank") == 1).select("bpuic", "Name")
+    "rank", F.row_number().over(nearest_station_window)
+).filter(F.col("rank") == 1).select("bpuic", "weather_station_name") # Use weather_station_name
 
-print("Identified nearest weather station for each stop..")
-print("Visual check that the closest weather station for each stop is correct..")
-stop_weatherStation_distance_df.filter(F.col("bpuic") == "8501207").sort(F.asc("distance")).show(10, truncate=False)
-nearest_weatherStation_df.show(5, truncate=False)
-
-
-"""
-Now that we have the closest weather station for each stop in nearest_weatherStation_df, we need to join
-raw_trip_data_df and nearest_weatherStation_df on bpuic. Then after this we have to align the weather data with the
-departure times of each trip.
-"""
-#This has now joined up every BPUIC with its nearest weather station in one dataframe
-raw_trip_data_with_weatherStation_df = raw_trip_data_df.join(
-    nearest_weatherStation_df.withColumnRenamed("Name", "weather_station"),
+# Join the nearest station name
+raw_trip_data_with_station = raw_trip_data_df.join(
+    nearest_weatherStation_df,
     on="bpuic",
-    how="left"
+    how="left" # Use left join in case a stop somehow doesn't match
 )
 
-print("Showing that the closest weather station has been joined for each stop..")
-raw_trip_data_with_weatherStation_df.show(5, truncate=False)
-raw_trip_data_with_weatherStation_df.printSchema()
-
+# Prepare weather_df: select necessary columns and include precipitation
 weather_data_to_join = weather_df.select(
     F.col("site").alias("weather_station_name"),
     F.col("valid_time_gmt"), # Unix timestamp
-    "temp", "dewPt", "feels_like", "gust", "pressure", "rh", "vis", "wspd", "clds", "wx_phrase", "day_ind" # Weather features
+    "temp", "dewPt", "feels_like", "gust", "pressure", "rh", "vis", "wspd",
+    "precip_hrly", "precip_total", # Added precipitation
+    "clds", "wx_phrase", "day_ind" # Weather features
 ).filter(F.col("valid_time_gmt").isNotNull()) # Ensure weather timestamp exists
 
-# Join based on station name and a *broad* time window (e.g., +/- 1 hour)
-# We use dep_time_unix from trip_data_with_station
-potential_weather_matches_df = raw_trip_data_with_weatherStation_df.join(
+# Join based on station name and a broad time window (+/- 1 hour)
+print("Joining trip data with potential weather matches...")
+potential_weather_matches_df = raw_trip_data_with_station.join(
     weather_data_to_join,
-    on="weather_station_name",
+    on="weather_station_name", # Match column names
     how="left" # Keep trip even if weather is missing temporarily
 ).where(
-    # Ensure weather reading is within +/- 1 hour (3600s) of planned departure
     abs(F.col("dep_time_unix") - F.col("valid_time_gmt")) <= 3600
 )
 
@@ -1659,32 +1648,237 @@ potential_weather_matches_df = potential_weather_matches_df.withColumn(
     "time_diff_weather_dep", abs(F.col("dep_time_unix") - F.col("valid_time_gmt"))
 )
 
-# Define a window partitioned by the unique trip stop event and ordered by time difference
-# Use operating_day, trip_id, bpuic, and dep_time as a unique key for the event
+# Select the single closest weather reading in time for each unique stop event
+print("Selecting the temporally closest weather reading...")
 closest_weather_window = Window.partitionBy(
-    "operating_day", "trip_id", "bpuic", "dep_time" # Use planned dep_time as part of the key
-).orderBy(F.asc("time_diff_weather_dep"))
+    "operating_day", "trip_id", "bpuic", "dep_time" # Unique key for the event
+).orderBy(F.asc("time_diff_weather_dep")) #THIS TAKES A LONG WHILE TO FINISH ~30 mins
 
-# Add row number based on closeness in time
 ranked_weather_matches_df = potential_weather_matches_df.withColumn(
     "weather_rank", F.row_number().over(closest_weather_window)
 )
 
-# Filter to keep only the closest weather reading (rank=1)
-final_trip_weather_df = ranked_weather_matches_df.filter(F.col("weather_rank") == 1).drop("weather_rank", "time_diff_weather_dep", "dep_time_unix", "valid_time_gmt")
+# Filter to keep only the closest weather reading (rank=1) and drop helper columns
+final_trip_weather_df = ranked_weather_matches_df.filter(F.col("weather_rank") == 1)\
+    .drop("weather_rank", "time_diff_weather_dep", "distance", "delta_lat", "delta_lon", "a", "c").cache() # Clean up intermediate cols
 
-print(f"Trip data count after joining closest weather: {final_trip_weather_df.count()}")
+print(f"Trip data count after joining closest weather: {final_trip_weather_df.count()}") 
 final_trip_weather_df.printSchema()
-final_trip_weather_df.show(5, truncate=False) # Verify join
 
 
 # %%
+"""
+Here we calculate the labels for the ML pipeline later on. We decided to look at arrival delay rather than departure
+delay. We also perform some minor feature expansions to seperate the time into hour, day, month, and year. 
+"""
+
+
+print("Calculating target label (arrival_delay > 5 min)...")
+# Create a new column called arrival_delay_sec which is the difference between the planned arrival time and the actual
+# arrival time. This is the delay in seconds
+final_trip_weather_df = final_trip_weather_df.withColumn(
+    "arrival_delay_sec",
+    (F.unix_timestamp(F.col("arr_actual")) - F.unix_timestamp(F.col("arr_time")))
+)
+
+#Create the label based on whether the delay is greater than 5 minutes (300 secs).
+delay_threshold = 300
+final_trip_weather_df = final_trip_weather_df.withColumn(
+    "label",
+    F.when(F.col("arrival_delay_sec") > delay_threshold, 1).otherwise(0)
+)
+
+
+#Show the label distribution to see how balanced or unbalanced the dataset is
+print("Label distribution:")
+label_counts_df = final_trip_weather_df.groupBy("label").count()
+label_counts = label_counts_df.collect()
+label_dict = {row["label"]: row["count"] for row in label_counts}
+print(label_dict)
+
+total = sum(label_dict.values())
+weights = {label: total / (len(label_dict) * count) for label, count in label_dict.items()}
+# Adding weights for weighted logisitc regression
+
+# Initialize expression to None
+weight_expr = None
+
+# Build the weight expression using all label values
+for label_value, weight_value in weights.items():
+    condition = (F.col("label") == label_value)
+    if weight_expr is None:
+        weight_expr = F.when(condition, F.lit(weight_value))
+    else:
+        weight_expr = weight_expr.when(condition, F.lit(weight_value))
+
+final_trip_weather_df = final_trip_weather_df.withColumn("weight", weight_expr)
+
+
+#Perform some minor feature expansions to seperate the time into hour, day, month, and year
+# The idea behind this is that we might be able to find some yearly, monthly ... ect time patterns that would be hard to
+# detect if we just had the timestamp. Theoretically now we can have an individual weight for each of these features or
+# perform other sinuodial transforms to better encode these patterns.
+final_trip_weather_df = final_trip_weather_df.withColumn("dep_year", F.year("dep_time")) # Added year for context
+final_trip_weather_df = final_trip_weather_df.withColumn("dep_month", F.month("dep_time"))
+final_trip_weather_df = final_trip_weather_df.withColumn("dep_dayofweek", F.dayofweek("dep_time")) # 1=Sun, 7=Sat
+final_trip_weather_df = final_trip_weather_df.withColumn("dep_hour", F.hour("dep_time"))
+
+
+# print("Calculating historical delay features...")
+
+# # Window specification for stop-based history: Partition by stop, order by planned departure time
+# # Look back 1 hour (3600 seconds) EXCLUDING the current row's time.
+# stop_hist_window = Window.partitionBy("bpuic") \
+#     .orderBy(F.col("dep_time_unix").cast("long")) \
+#     .rangeBetween(-3600, -1) # Look back 1 hour, up to 1 second before current event
+
+# # Window specification for line-based history: Partition by line, order by planned departure time
+# line_hist_window = Window.partitionBy("line_text") \
+#     .orderBy(F.col("dep_time_unix").cast("long")) \
+#     .rangeBetween(-3600, -1) # Look back 1 hour, up to 1 second before current event
+
+# # Calculate average arrival delay over the windows
+# # The Avg function will return null if the window is empty. However we can handle this with the imputer later on when we
+# # have to fix all the null values. 
+# final_trip_weather_df = final_trip_weather_df.withColumn(
+#     "avg_delay_stop_last_hour", F.avg("arrival_delay_sec").over(stop_hist_window)
+# )
+# final_trip_weather_df = final_trip_weather_df.withColumn(
+#     "avg_delay_line_last_hour", F.avg("arrival_delay_sec").over(line_hist_window)
+# )
+
+# print("Historical delay features calculated.")
+
+# Drop original timestamp columns not needed as features anymore
+#final_trip_weather_df = final_trip_weather_df.drop("arr_time", "arr_actual", "dep_time")
+
 
 # %%
+"""
+In this code block we define the features that we are going to use. We split them into numerical and categorical
+features. It should be noted that things like the year, day, month, and hour are categorical features since they do not
+have a numerical relationship. I.e. like 12pm is not 12 times more likely to create a delay than 1pm. Or like day 7 (a
+sunday) is not 7 times more likely to create a delay than day 1 (a monday). So this is why we have to treat them as categorical
+features rather than numeric.
+"""
+
+
+print("Defining feature columns...")
+# Categorical Features: (Same as before) (Removed BPUIC, WeatherStationName) 
+categorical_cols = [
+    "product_id", "line_text", "transport", "day_ind", "dep_year", "dep_month", 
+    "dep_dayofweek", "dep_hour"
+]
+
+# Numerical Features: (Now including historical delay features)
+numerical_cols = [
+    "stop_lat", "stop_lon",
+    "temp", "dewPt", "feels_like", "pressure", "rh", "wspd",
+    "precip_hrly", "precip_total",
+    # "avg_delay_stop_last_hour", # Added historical feature
+    # "avg_delay_line_last_hour"  # Added historical feature
+]
+
+#Explictly cast bpuic to string if it is an int
+if 'bpuic' in final_trip_weather_df.columns and dict(final_trip_weather_df.dtypes)['bpuic'] == 'int':
+     final_trip_weather_df = final_trip_weather_df.withColumn("bpuic", F.col("bpuic").cast(StringType()))
+
+#Select all the columns we need from the final_trip_weather_df
+existing_categorical = [c for c in categorical_cols if c in final_trip_weather_df.columns]
+existing_numerical = [c for c in numerical_cols if c in final_trip_weather_df.columns]
+final_cols_to_select = existing_categorical + existing_numerical + ["label", "weight"]
+
+model_input_df = final_trip_weather_df.select(final_cols_to_select)
+
+#This is just a sanity check to make sure that the columns we selected are actually in the new model_input_df.
+print("Schema of model data:")
+model_input_df.printSchema()
+model_input_df.show(5, truncate=False)
 
 # %%
+"""
+Here we drop any columns that have more than 50% null values. Since these are mostly null it doesnt make sense to impute
+values to them.
+"""
+
+total_count = model_input_df.count()
+
+for c in existing_categorical:
+    null_count = model_input_df.select(F.count(F.when(F.col(c).isNull(), 1)).alias("nulls")).collect()[0]["nulls"]
+    print(f"{c} has {null_count}/{total_count} nulls")
+    if null_count/total_count >= 0.5:
+        print(f"{c} has more than 50% null values. Dropping col...")
+        existing_categorical.remove(c)
+
+imputable_numerical_cols = []
+
+for c in existing_numerical:
+    null_count = model_input_df.select(F.count(F.when(F.col(c).isNull(), 1)).alias("nulls")).collect()[0]["nulls"]
+    print(f"{c} has {null_count}/{total_count} nulls")
+    if null_count/total_count >= 0.5:
+        print(f"{c} has more than 50% null values. Dropping col...")
+        existing_numerical.remove(c)
+    elif null_count/total_count > 0.0:
+        imputable_numerical_cols.append(c)
+
 
 # %%
+from pyspark.ml.feature import Imputer
+
+"""
+Here we will handle the case of missing values. We will make use of an imputer to fill in these values (where
+appropriate) rather than just getting rid of them.
+"""
+
+if len(imputable_numerical_cols) > 0:
+    print(f"Imputing values for {imputable_numerical_cols}.")
+
+for col_name in existing_numerical: # Use list of columns that actually exist
+     if col_name in model_input_df.columns:
+         if dict(model_input_df.dtypes)[col_name] != 'double':
+             print(f"Casting {col_name} to double.")
+             model_input_df = model_input_df.withColumn(col_name, F.col(col_name).cast(DoubleType()))
+
+
+# Imputer for numerical columns (will handle NaNs from weather AND historical calculations)
+if imputable_numerical_cols:
+    imputer = Imputer(
+        inputCols=imputable_numerical_cols,
+        outputCols=[f"{col}_imputed" for col in imputable_numerical_cols],
+        strategy="mean" # Or median. Mean is often fine for delays unless very skewed.
+    )
+    print("Fitting imputer...")
+    imputer_model = imputer.fit(model_input_df)
+    print("Transforming data with imputer...")
+    model_input_df = imputer_model.transform(model_input_df)
+
+    # Drop original numerical columns, keep imputed ones
+    cols_to_drop = imputable_numerical_cols
+    model_input_df = model_input_df.drop(*cols_to_drop)
+
+    # Rename imputed columns back to original names
+    imputed_numerical_cols_final = []
+    for col in imputable_numerical_cols:
+        imputed_col_name = f"{col}_imputed"
+        model_input_df = model_input_df.withColumnRenamed(imputed_col_name, col)
+        imputed_numerical_cols_final.append(col)
+else:
+    imputed_numerical_cols_final = []
+
+
+print(f"Data count after numerical imputation: {model_input_df.count()}")
+
+# Cache the final features DataFrame ready for pipeline
+final_feature_columns = existing_categorical + imputed_numerical_cols_final
+features_final_df = model_input_df.select(final_feature_columns + ["label", "weight"]).cache()
+
+print("Final features DataFrame prepared and cached.")
+print("Schema ready for ML Pipeline:")
+features_final_df.printSchema()
+features_final_df.show(5, truncate=False) # Check imputed historical values
+
+# %%
+features_final_df.show(5, truncate=False)
 
 # %% [markdown]
 # ### III.b Model building - 6/20
@@ -1701,13 +1895,152 @@ final_trip_weather_df.show(5, truncate=False) # Verify join
 #         - Train the selected model using the feature vectors constructed from the provided data.
 
 # %%
-# TODO ...
+from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, StandardScaler, Imputer
+from pyspark.ml import Pipeline, PipelineModel
+from pyspark.ml.classification import LogisticRegression, RandomForestClassifier, GBTClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
+
+"""
+Now that we have imputed all the missing values, we can begin with the model building. We will need to One-Hot Encode
+the categorical features. 
+"""
+
+
+# For safety, let's redefine them based on features_final_df schema, assuming 'label' is the last col
+all_cols_in_features_df = features_final_df.columns
+label_col_name = "label"
+feature_cols_in_features_df = [c for c in all_cols_in_features_df if c != label_col_name]
+
+# Re-derive final_categorical_cols and final_numerical_cols based on their original definitions
+# and what actually exists in features_final_df.
+# This assumes 'existing_categorical' and 'imputed_numerical_cols_final' are correctly defined from cell [110] / [111]
+# For robustness, explicitly use the lists that were used to create features_final_df
+# If running cells independently, these might need to be re-established or passed.
+# Assuming existing_categorical and imputed_numerical_cols_final are correctly defined and available:
+final_categorical_cols = [c for c in existing_categorical if c in features_final_df.columns]
+final_numerical_cols = [c for c in imputed_numerical_cols_final if c in features_final_df.columns]
+
+# This will create the string index to be used in the OHE stage
+index_stages = [
+    StringIndexer(inputCol=col_name, outputCol=col_name + "_index", handleInvalid="skip")
+    for col_name in final_categorical_cols
+]
+
+ohe_stages = [
+    OneHotEncoder(inputCol=col_name + "_index", outputCol=col_name + "_vec")
+    for col_name in final_categorical_cols
+]
+
+
+# Assembler for combining features (used by RF and GBT directly)
+assembler_input_cols_lr = [c + "_vec" for c in final_categorical_cols] + final_numerical_cols
+vector_assembler_lr = VectorAssembler(inputCols=assembler_input_cols_lr, outputCol="features", handleInvalid="skip")
+
+# Base transformation stages (excluding scaling) - these are common
+lr_transformer_stages = index_stages + ohe_stages + [vector_assembler_lr]
+
+
+# Scaler (for Logistic Regression) - applied AFTER vector assembly
+scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
+
+
+
+assembler_input_cols_rf_gbt = [c + "_index" for c in final_categorical_cols] + final_numerical_cols
+vector_assembler_rf_gbt = VectorAssembler(inputCols=assembler_input_cols_rf_gbt, outputCol="features", handleInvalid="skip")
+common_transformer_stages_rf_gbt = index_stages + [vector_assembler_rf_gbt]
+
+
+
+# %% [markdown]
+# ### Logistic Regression
 
 # %%
+lr_stages = lr_transformer_stages + [scaler] + [
+    LogisticRegression(
+        featuresCol="scaledFeatures", # Use scaled features
+        labelCol="label",
+        maxIter=10, # Keep low for initial run, tune later
+        regParam=0.01,
+        elasticNetParam=0.0, # L2 regularization
+        weightCol="weight"
+    )
+]
+lr_pipeline = Pipeline(stages=lr_stages)
+
+
+# %% [markdown]
+# ### Random Forest
 
 # %%
+rf_stages = common_transformer_stages_rf_gbt + [
+    RandomForestClassifier(
+        featuresCol="features", # Use non-scaled features
+        labelCol="label",
+        numTrees=100,       # Default: 20, can increase
+        maxDepth=5,         # Default: 5, good starting point
+        seed=42,            # For reproducibility
+        maxBins=64,
+        weightCol="weight" 
+    )
+]
+rf_pipeline = Pipeline(stages=rf_stages)
+
+# %% [markdown]
+# ### Gradient Boosted Trees
 
 # %%
+# Pipeline 3: Gradient Boosted Trees (with Original Features from VectorAssembler)
+gbt_stages = common_transformer_stages_rf_gbt
+
+gbt = GBTClassifier(
+    featuresCol="features",
+    labelCol="label",
+    maxIter=20,
+    maxDepth=5,
+    maxBins=64,
+    weightCol="weight",
+    seed=42
+)
+
+gbt_stages = common_transformer_stages_rf_gbt + [gbt]
+
+gbt_pipeline = Pipeline(stages=gbt_stages)
+
+# %% [markdown]
+# ### Training Pipeline
+#
+
+# %%
+print("Splitting data into training and test sets (80/20)...")
+# Ensure features_final_df is cached (done at the end of your previous cell)
+(train_data, test_data) = features_final_df.randomSplit([0.8, 0.2], seed=42)
+
+train_data.cache()
+test_data.cache()
+print(f"Training data count: {train_data.count()}")
+print(f"Test data count: {test_data.count()}")
+
+
+print("\n--- Training Models ---")
+models_to_train_and_evaluate = {
+    "Logistic Regression": lr_pipeline,
+    "Random Forest": rf_pipeline,
+    "Gradient Boosted Trees": gbt_pipeline
+}
+
+trained_models = {} # To store the fitted PipelineModels
+for model_name, pipeline_definition in models_to_train_and_evaluate.items():
+    print(f"Training {model_name}...")
+    try:
+        fitted_model = pipeline_definition.fit(train_data)
+        trained_models[model_name] = fitted_model
+        print(f"{model_name} training complete.")
+    except Exception as e:
+        print(f"ERROR training {model_name}: {e}")
+        trained_models[model_name] = None # Mark as failed
+
+print("\nAll model training attempted.")
+
 
 # %% [markdown]
 # ### III.c Model evaluation - 6/20
@@ -1721,13 +2054,438 @@ final_trip_weather_df.show(5, truncate=False) # Verify join
 #     * Iterate III.a)on your model by fine-tuning hyperparameters, exploring additional feature engineering techniques, or experimenting with different algorithms to improve predictive performance.
 #
 
-# %%
+# %% [markdown]
+# ### Evaluating Models
+#
+# ```
+#
+# --- Evaluating Models ---
+#
+# --- Evaluating Logistic Regression ---
+# Generated predictions for Logistic Regression.
+#                                                                                 
+# AUC = 0.7451
+# Accuracy = 0.6498
+# F1 Score (Weighted) = 0.7412
+# Precision (for Label 1) = 0.1151
+# Recall (for Label 1) = 0.7198
+# F1 Score (for Label 1) = 0.7412
+# Precision (for Label 0) = 0.9729
+# Recall (for Label 0) = 0.6454
+# F1 Score (for Label 0) = 0.7412
+#
+# --- Evaluating Random Forest ---
+# Generated predictions for Random Forest.
+#                                                                                 
+# AUC = 0.6875
+# Accuracy = 0.9398
+# F1 Score (Weighted) = 0.9106
+# Precision (for Label 1) = 0.0000
+# Recall (for Label 1) = 0.0000
+# F1 Score (for Label 1) = 0.9106
+# Precision (for Label 0) = 0.9398
+# Recall (for Label 0) = 1.0000
+# F1 Score (for Label 0) = 0.9106
+#
+# Feature Importances (Random Forest):
+#   line_text_index: 0.3548
+#   dep_hour_index: 0.2841
+#   transport_index: 0.1172
+#   product_id_index: 0.1014
+#   dep_month_index: 0.0565
+#   dep_year_index: 0.0350
+#   pressure: 0.0196
+#   precip_hrly: 0.0087
+#   rh: 0.0081
+#   feels_like: 0.0076
+#   day_ind_index: 0.0032
+#   temp: 0.0025
+#   wspd: 0.0013
+#   dep_dayofweek_index: 0.0000
+#   dewPt: 0.0000
+#
+# --- Evaluating Gradient Boosted Trees ---
+# Generated predictions for Gradient Boosted Trees.
+# [Stage 3716:========================================>          (159 + 29) / 200]
+# AUC = 0.7580
+# Accuracy = 0.9398
+# F1 Score (Weighted) = 0.9107
+# Precision (for Label 1) = 0.6343
+# Recall (for Label 1) = 0.0005
+# F1 Score (for Label 1) = 0.9107
+# Precision (for Label 0) = 0.9398
+# Recall (for Label 0) = 1.0000
+# F1 Score (for Label 0) = 0.9107
+#
+# Feature Importances (Gradient Boosted Trees):
+#   line_text_index: 0.3645
+#   dep_hour_index: 0.2772
+#   dep_dayofweek_index: 0.1210
+#   dep_month_index: 0.1165
+#   dep_year_index: 0.0906
+#   precip_hrly: 0.0061
+#   temp: 0.0057
+#   pressure: 0.0054
+#   rh: 0.0047
+#   day_ind_index: 0.0034
+#   dewPt: 0.0025
+#   feels_like: 0.0024
+#   product_id_index: 0.0000
+#   transport_index: 0.0000
+#   wspd: 0.0000
+# ```
+#
+# Here are the rough model evaluations and feature importance. This may slightly change between runs due to the random initializations.
+#
 
 # %%
+print("\n--- Evaluating Models ---")
+
+evaluation_results_summary = {}
+
+# For AUC, rawPredictionCol is typically used (often contains scores before thresholding)
+# Most Spark classifiers output rawPrediction, probability, and prediction
+evaluator_auc = BinaryClassificationEvaluator(labelCol="label", rawPredictionCol="rawPrediction", metricName="areaUnderROC")
+
+# For other metrics, predictionCol (final 0/1 class) is used
+evaluator_multi = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction")
+
+for model_name, fitted_pipeline_model in trained_models.items():
+    if fitted_pipeline_model is None:
+        print(f"Skipping evaluation for {model_name} (failed training).")
+        continue
+
+    print(f"\n--- Evaluating {model_name} ---")
+
+    # 1. Make Predictions
+    try:
+        predictions = fitted_pipeline_model.transform(test_data)
+        predictions.cache() # Cache predictions for multiple evaluations on this model's output
+        print(f"Generated predictions for {model_name}.")
+        # predictions.select("label", "rawPrediction", "probability", "prediction").show(5, truncate=False) # Optional check
+    except Exception as e:
+        print(f"ERROR generating predictions for {model_name}: {e}")
+        if 'predictions' in locals() and predictions.is_cached: predictions.unpersist()
+        continue
+
+
+    # 2. Calculate Metrics
+    try:
+        auc = -1.0 # Default if rawPrediction is not available
+        # Some models might not produce 'rawPrediction' if not applicable (though common for binary classifiers)
+        # Or if featureCol for model was set incorrectly.
+        if "rawPrediction" in predictions.columns:
+            auc = evaluator_auc.evaluate(predictions)
+        else:
+            print(f"Warning: 'rawPrediction' column not found for {model_name}. AUC cannot be calculated this way.")
+
+        accuracy = evaluator_multi.setMetricName("accuracy").evaluate(predictions)
+        f1_weighted = evaluator_multi.setMetricName("f1").evaluate(predictions) # Default F1 is weighted
+        precision_1 = evaluator_multi.setMetricName("precisionByLabel").setMetricLabel(1).evaluate(predictions)
+        recall_1 = evaluator_multi.setMetricName("recallByLabel").setMetricLabel(1).evaluate(predictions)
+        f1_1 = evaluator_multi.setMetricName("f1").setMetricLabel(1).evaluate(predictions) # F1 for label 1
+        precision_0 = evaluator_multi.setMetricName("precisionByLabel").setMetricLabel(0).evaluate(predictions)
+        recall_0 = evaluator_multi.setMetricName("recallByLabel").setMetricLabel(0).evaluate(predictions)
+        f1_0 = evaluator_multi.setMetricName("f1").setMetricLabel(0).evaluate(predictions) # F1 for label 0
+
+
+        evaluation_results_summary[model_name] = {
+            "AUC": auc,
+            "Accuracy": accuracy,
+            "F1 (Weighted)": f1_weighted,
+            "Precision (Label 1)": precision_1,
+            "Recall (Label 1)": recall_1,
+            "F1 (Label 1)": f1_1,
+            "Precision (Label 0)": precision_0,
+            "Recall (Label 0)": recall_0,
+            "F1 (Label 0)": f1_0
+        }
+
+        print(f"AUC = {auc:.4f}")
+        print(f"Accuracy = {accuracy:.4f}")
+        print(f"F1 Score (Weighted) = {f1_weighted:.4f}")
+        print(f"Precision (for Label 1) = {precision_1:.4f}")
+        print(f"Recall (for Label 1) = {recall_1:.4f}")
+        print(f"F1 Score (for Label 1) = {f1_1:.4f}")
+        print(f"Precision (for Label 0) = {precision_0:.4f}")
+        print(f"Recall (for Label 0) = {recall_0:.4f}")
+        print(f"F1 Score (for Label 0) = {f1_0:.4f}")
+
+
+        # Feature Importance (for tree-based models)
+        if model_name in ["Random Forest", "Gradient Boosted Trees"]:
+             print(f"\nFeature Importances ({model_name}):")
+             try:
+                 model_stage_in_pipeline = fitted_pipeline_model.stages[-1] # The classifier is the last stage
+                 if hasattr(model_stage_in_pipeline, "featureImportances"):
+                     importances = model_stage_in_pipeline.featureImportances
+                     va_stage = next(s for s in fitted_pipeline_model.stages if isinstance(s, VectorAssembler))
+                     
+                     # Attempt to get feature names from VectorAssembler metadata
+                     feature_names_from_va = []
+                     try:
+                         attrs = sorted(
+                             (attr["idx"], attr["name"]) for attr_type in va_stage.getOutputMetadata()["ml_attr"]["attrs"]
+                             for attr in va_stage.getOutputMetadata()["ml_attr"]["attrs"][attr_type]
+                         )
+                         feature_names_from_va = [name for idx, name in attrs]
+                     except Exception: # Fallback if metadata is not as expected
+                         feature_names_from_va = va_stage.getInputCols()
+
+                     if len(feature_names_from_va) == len(importances):
+                        feature_importance_list = sorted(list(zip(feature_names_from_va, importances)), key=lambda x: x[1], reverse=True)
+                        for f_name, f_importance in feature_importance_list[:15]: # Show top 15
+                            print(f"  {f_name}: {f_importance:.4f}")
+                     else:
+                         print(f"  Could not match feature names to importances vector. Assembler names: {len(feature_names_from_va)}, Importances: {len(importances)}")
+                 else:
+                     print(f"  Feature importances attribute not found for {model_name} stage.")
+             except Exception as e_fi_outer:
+                 print(f"  Error accessing/processing feature importances: {e_fi_outer}")
+
+    except Exception as e:
+        print(f"ERROR evaluating {model_name}: {e}")
+    finally:
+        if 'predictions' in locals() and predictions.is_cached: predictions.unpersist()
 
 # %%
+print("\n--- Model Comparison Summary ---")
+# Header
+header = f"{'Model':<25} | {'AUC':<10} | {'Accuracy':<10} | {'F1 (W)':<10} | {'P (L1)':<10} | {'R (L1)':<10} | {'F1 (L1)':<10} | {'P (L0)':<10} | {'R (L0)':<10} | {'F1 (L0)':<10}"
+print(header)
+print("-" * len(header))
+
+best_model_name_overall = None
+# Choose a primary metric for "best" model selection, e.g., F1 for Label 1 or AUC
+primary_metric_for_selection = "F1 (Label 1)"
+best_primary_metric_value = -1
+
+for model_name_iter, metrics in evaluation_results_summary.items():
+    auc_val = metrics.get('AUC', -1)
+    acc_val = metrics.get('Accuracy', -1)
+    f1_w_val = metrics.get('F1 (Weighted)', -1)
+    p_l1_val = metrics.get('Precision (Label 1)', -1)
+    r_l1_val = metrics.get('Recall (Label 1)', -1)
+    f1_l1_val = metrics.get('F1 (Label 1)', -1)
+    p_l0_val = metrics.get('Precision (Label 0)', -1)
+    r_l0_val = metrics.get('Recall (Label 0)', -1)
+    f1_l0_val = metrics.get('F1 (Label 0)', -1)
+    print(f"{model_name_iter:<25} | {auc_val:<10.4f} | {acc_val:<10.4f} | {f1_w_val:<10.4f} | {p_l1_val:<10.4f} | {r_l1_val:<10.4f} | {f1_l1_val:<10.4f} | {p_l0_val:<10.4f} | {r_l0_val:<10.4f} | {f1_l0_val:<10.4f}")
+
+    current_primary_metric = metrics.get(primary_metric_for_selection, -1)
+    if current_primary_metric > best_primary_metric_value:
+        best_primary_metric_value = current_primary_metric
+        best_model_name_overall = model_name_iter
+
+print("-" * len(header))
+if best_model_name_overall:
+    print(f"\nSelected best model based on highest {primary_metric_for_selection}: {best_model_name_overall} ({best_primary_metric_value:.4f})")
+    # Example: You could now save this best model
+    # best_pipeline_model_to_save = trained_models[best_model_name_overall]
+    # best_pipeline_model_to_save.write().overwrite().save(f"/user/{username}/assignment-3/best_delay_model_pipeline")
+else:
+    print("\nNo models evaluated successfully or primary metric not found.")
+
+# %% [markdown]
+# <font color="#7777ff">
+#
+# ### Ensembling Model Prediction
+#
+# ```
+# Metrics for Ensemble Model
+# AUC = 0.7617
+# Accuracy = 0.6623
+# F1 Score (Weighted) = 0.7507
+# Precision (for Label 1) = 0.1202
+# Recall (for Label 1) = 0.7296
+# F1 Score (for Label 1) = 0.7507
+# Precision (for Label 0) = 0.9743
+# Recall (for Label 0) = 0.6580
+# F1 Score (for Label 0) = 0.7507
+# ```
+#
+# We noticed that ensembling the models barely improved performance during. The exact values may slightly fluctuate due to
+# the randomized initializations of the models, however large fluctuations were not observed during multiple runs. So our
+# final choose model will be the Gradient Boosted Trees due to its high F1 score and improved precision and recall metrics for both labels
+# over Logistic Regression and Random Forests
 
 # %%
+from pyspark.sql.functions import monotonically_increasing_id
+from pyspark.sql.functions import udf
+from pyspark.sql.types import DoubleType
+
+def extract_positive_class(v):
+    return float(v[1]) if v is not None else None
+
+extract_prob_udf = udf(extract_positive_class, DoubleType())
+
+model1 = trained_models["Logistic Regression"]
+model2 = trained_models["Random Forest"]
+model3 = trained_models["Gradient Boosted Trees"]
+
+# Create a unique ID for each row to allow for joining later
+test_data_with_id = test_data.withColumn("row_id", monotonically_increasing_id())
+
+# Make predictions from all the models based on the test data
+pred1 = model1.transform(test_data_with_id).select("row_id", "label", "probability").withColumnRenamed("probability", "prob1")
+pred2 = model2.transform(test_data_with_id).select("row_id", "probability").withColumnRenamed("probability", "prob2")
+pred3 = model3.transform(test_data_with_id).select("row_id", "probability").withColumnRenamed("probability", "prob3")
+
+
+ensemble_df = pred1.join(pred2, on="row_id").join(pred3, on="row_id")
+
+ensemble_df = ensemble_df \
+    .withColumn("prob1_class1", extract_prob_udf("prob1")) \
+    .withColumn("prob2_class1", extract_prob_udf("prob2")) \
+    .withColumn("prob3_class1", extract_prob_udf("prob3")) \
+    .withColumn("avg_prob", (F.col("prob1_class1") + F.col("prob2_class1") + F.col("prob3_class1")) / 3) \
+    .withColumn("final_prediction", (F.col("avg_prob") > 0.5).cast("double"))
+
+ensemble_df.show(5, truncate=False)
+ensemble_df.printSchema()
+
+evaluator_auc = BinaryClassificationEvaluator(labelCol="label", rawPredictionCol="avg_prob", metricName="areaUnderROC")
+
+evaluator_multi = MulticlassClassificationEvaluator(labelCol="label", predictionCol="final_prediction")
+
+auc = evaluator_auc.evaluate(ensemble_df)
+
+accuracy = evaluator_multi.setMetricName("accuracy").evaluate(ensemble_df)
+f1_weighted = evaluator_multi.setMetricName("f1").evaluate(ensemble_df) # Default F1 is weighted
+precision_1 = evaluator_multi.setMetricName("precisionByLabel").setMetricLabel(1).evaluate(ensemble_df)
+recall_1 = evaluator_multi.setMetricName("recallByLabel").setMetricLabel(1).evaluate(ensemble_df)
+f1_1 = evaluator_multi.setMetricName("f1").setMetricLabel(1).evaluate(ensemble_df) # F1 for label 1
+precision_0 = evaluator_multi.setMetricName("precisionByLabel").setMetricLabel(0).evaluate(ensemble_df)
+recall_0 = evaluator_multi.setMetricName("recallByLabel").setMetricLabel(0).evaluate(ensemble_df)
+f1_0 = evaluator_multi.setMetricName("f1").setMetricLabel(0).evaluate(ensemble_df) # F1 for label 0
+
+
+print("\nMetrics for Ensemble Model")
+print(f"AUC = {auc:.4f}")
+print(f"Accuracy = {accuracy:.4f}")
+print(f"F1 Score (Weighted) = {f1_weighted:.4f}")
+print(f"Precision (for Label 1) = {precision_1:.4f}")
+print(f"Recall (for Label 1) = {recall_1:.4f}")
+print(f"F1 Score (for Label 1) = {f1_1:.4f}")
+print(f"Precision (for Label 0) = {precision_0:.4f}")
+print(f"Recall (for Label 0) = {recall_0:.4f}")
+print(f"F1 Score (for Label 0) = {f1_0:.4f}")
+
+
+
+
+# %% [markdown]
+# <font color="#7777ff">
+#
+# ## Now we perform Cross Validation to check for overfitting
+#
+# Performing the Cross Validation with hyperparameter tuning takes a while to run. The best model parameters will be posted
+# here for convenience
+
+# %%
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+
+
+evaluator = BinaryClassificationEvaluator(labelCol="label", rawPredictionCol="rawPrediction", metricName="areaUnderROC")
+
+paramGrid = ParamGridBuilder() \
+    .addGrid(gbt.getParam("maxDepth"), [3, 5, 7]) \
+    .addGrid(gbt.getParam("maxIter"), [10, 20, 50]) \
+    .addGrid(gbt.getParam("stepSize"), [0.1, 0.2]) \
+    .build()
+
+
+cv = CrossValidator(
+    estimator=gbt_pipeline,
+    estimatorParamMaps=paramGrid,
+    evaluator=evaluator,
+    numFolds=5,           # 5-fold CV
+    parallelism=5,
+    seed=42
+)
+
+# Fit on training data
+print("Fitting cross-validated GBT model on training data...")
+cv_model = cv.fit(train_data)
+
+# Best model
+best_model = cv_model.bestModel
+
+# Evaluate on train_data
+print("\nEvaluating best model on full training set...")
+train_predictions = best_model.transform(train_data)
+train_auc = evaluator.evaluate(train_predictions)
+print(f"Training AUC: {train_auc:.4f}")
+
+# Cross-validation metrics (average AUC per param set)
+print("\nCross-validation average AUC scores for all parameter settings:")
+for params, metric in zip(cv_model.getEstimatorParamMaps(), cv_model.avgMetrics):
+    param_str = {p.name: v for p, v in params.items()}
+    print(f"Params: {param_str} => CV AUC: {metric:.4f}")
+
+best_cv_auc = max(cv_model.avgMetrics)
+print(f"\nBest average CV AUC: {best_cv_auc:.4f}")
+
+# Evaluate on test_data
+print("\nEvaluating best model on held-out test set...")
+test_predictions = best_model.transform(test_data)
+test_auc = evaluator.evaluate(test_predictions)
+print(f"Test AUC: {test_auc:.4f}")
+
+
+print("Printing best model summary")
+best_gbt_model = best_model.stages[-1]
+print(f"Best maxDepth: {best_gbt_model.getMaxDepth()}")
+print(f"Best maxIter: {best_gbt_model.getMaxIter()}")
+print(f"Best stepSize: {best_gbt_model.getStepSize()}")
+
+# %%
+#Evaluating the Best model
+
+
+evaluator_multi = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction")
+
+accuracy = evaluator_multi.setMetricName("accuracy").evaluate(predictions)
+f1_weighted = evaluator_multi.setMetricName("f1").evaluate(predictions) # Default F1 is weighted
+precision_1 = evaluator_multi.setMetricName("precisionByLabel").setMetricLabel(1).evaluate(predictions)
+recall_1 = evaluator_multi.setMetricName("recallByLabel").setMetricLabel(1).evaluate(predictions)
+f1_1 = evaluator_multi.setMetricName("f1").setMetricLabel(1).evaluate(predictions) # F1 for label 1
+precision_0 = evaluator_multi.setMetricName("precisionByLabel").setMetricLabel(0).evaluate(predictions)
+recall_0 = evaluator_multi.setMetricName("recallByLabel").setMetricLabel(0).evaluate(predictions)
+f1_0 = evaluator_multi.setMetricName("f1").setMetricLabel(0).evaluate(predictions) # F1 for label 0
+
+model_name_iter = Optimized_GBT
+
+
+header = f"{'Model':<25} | {'AUC':<10} | {'Accuracy':<10} | {'F1 (W)':<10} | {'P (L1)':<10} | {'R (L1)':<10} | {'F1 (L1)':<10} | {'P (L0)':<10} | {'R (L0)':<10} | {'F1 (L0)':<10}"
+print(header)
+print("-" * len(header))
+print(f"{model_name_iter:<25} | {auc_val:<10.4f} | {acc_val:<10.4f} | {f1_w_val:<10.4f} | {p_l1_val:<10.4f} | {r_l1_val:<10.4f} | {f1_l1_val:<10.4f} | {p_l0_val:<10.4f} | {r_l0_val:<10.4f} | {f1_l0_val:<10.4f}")
+print("-" * len(header))
+
+# %% [markdown]
+# <font color="#7777ff">
+#
+# ## Improvements for the model
+# ### Weighted Regression
+# We noticed there was a large class imbalance where the majority of the trips had a delay of less than 5 minutes. So
+# initially the models would mostly predict 0s for all the inputs regardless of the features. So we made use of the
+# weighted regression features to numerically increase the importance of the minority class. This works by penalizing
+# the model more when it incorrectly predicts a trip. This massively boosted the Precision, Recall and F1 metrics of all
+# the models. From our testing we found that Weighted Gradient Boosted Trees (WGBT) narrowly beat out the Weighted Random Forest and
+# Weighted Logistic Regression models. Consequently, we choose The WGBT model as our final model.
+#
+# ### Hyperparameter tuning using Cross Validation
+# Once we choose the best model, we tuned this further using Cross Validation. In Cross Validation, we split the training
+# datatset in $K$ separate folds. $K-1$ folds will be used during training, while the $k^{\text{th}}$ fold will be used
+# for testing. This allows us to perform hyperparameter tuning while ensuring there is no data leakage (i.e. an instance
+# of the model will
+# never be tested on data that it was trained on). The testing set from the original will now be used as a validation set
+# to ensure there is no overfitting.
+
+# %% [markdown]
+# ## Model Interpretation and Improvements for the Project
 
 # %% [markdown]
 # # That's all, folks!
@@ -1736,3 +2494,5 @@ final_trip_weather_df.show(5, truncate=False) # Verify join
 
 # %%
 spark.stop()
+
+# %%
