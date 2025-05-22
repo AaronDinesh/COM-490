@@ -153,6 +153,7 @@ print(f"Business Hours (seconds): {business_hours_start_sec} to {business_hours_
 print(f"Max Walking Distance: {MAX_WALKING_DISTANCE_METERS}m")
 print(f"Walking Speed: {WALKING_SPEED_MPS:.2f} m/s")
 
+
 # -
 
 # ## Defining some Helper Functions for later:
@@ -425,10 +426,46 @@ stops_lausanne_rt.writeTo(f"""{namespace}.sbb_stops_lausanne_region""")\
 
 # # II. Public Transport Network Model
 
+# %pip install networkx
+
 # !pip install networkx
+
+# ensure the personal spark catalog exist
+username, _ = getUsername()
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS spark_catalog.{username}")
+
+# +
+stops_lausanne_rt.createOrReplaceTempView("stops_lausanne_rt")
+
+# sanity check
+spark.sql("SHOW TABLES").filter("tableName = 'stops_lausanne_rt'").show()
 
 # +
 business_hours_start = '07:00:00'
+business_hours_end = '17:59:59'
+
+# Read the shared stop_times from the iceberg.sbb catalog
+shared_st = spark.table("iceberg.sbb.stop_times")
+
+# Read lausanne stops from the spark_catalog
+lausanne_st = spark.table(f"stops_lausanne_rt").select("stop_id")
+
+# filter by pub_date, region, business hours (start, end)
+stop_times_df = (
+    shared_st
+      .filter((col("pub_date") >= lit("2024-07-01")) &
+              (col("pub_date") <  lit("2024-07-05")))
+      .join(lausanne_st, on="stop_id", how="inner")
+      .filter((col("departure_time") >= lit(business_hours_start)) &
+              (col("arrival_time")   <= lit(business_hours_end)))
+      .select("trip_id", "stop_id", "departure_time", "arrival_time"))
+# -
+
+#sanity check
+print("tot filtered rows:", stop_times_df.count())
+stop_times_df.show(5, truncate=False)
+
+'''business_hours_start = '07:00:00'
 business_hours_end = '17:59:59'
 
 query = f"""
@@ -451,8 +488,7 @@ with closing(conn.cursor()) as cur:
     cols = [desc[0] for desc in cur.description]
     rows = cur.fetchall()
 
-stop_times_df = spark.createDataFrame(pd.DataFrame(rows, columns=cols))
-# -
+stop_times_df = spark.createDataFrame(pd.DataFrame(rows, columns=cols))'''
 
 joined_df = stops_lausanne.join(stop_times_df, 'stop_id', 'inner')
 
@@ -562,11 +598,378 @@ print(f"Edges: {len(G.edges)}")
 
 # # III. Predictive Model
 
-# # IV. Route Planning Algorithm
+# import libraries
+from pyspark.sql import functions as F
+from pyspark.sql.functions import unix_timestamp, col, lit
+from pyspark.sql.functions import hour, percentile_approx
+from pyspark.sql.functions import to_timestamp, dayofweek, dayofyear
+from pyspark.sql.functions import regexp_extract
+from pyspark.sql.functions import broadcast
+from pyspark.sql.functions import regexp_extract, min as Fmin, count as Fcount
+from pyspark.sql.functions import sin, cos, lit, col
+import math
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import GBTRegressor
+from pyspark.ml import Pipeline
 
+# ## Historical delay data
+
+# historical data
+hist_ist = (
+    istdaten
+      .filter(
+          (col("operating_day") >= lit(historical_start_date)) &
+          (col("operating_day") <= lit(historical_end_date)))
+      .withColumn("arr_delay_s", unix_timestamp("arr_actual") - unix_timestamp("arr_time"))
+      .withColumn("dep_delay_s", unix_timestamp("dep_actual") - unix_timestamp("dep_time"))
+      .filter((col("arr_delay_s") > -120) & (col("arr_delay_s") < 3600))
+      .filter((col("dep_delay_s") > -120) & (col("dep_delay_s") < 3600))
+      .filter((hour(col("dep_actual")) >= lit(7)) & (hour(col("dep_actual")) < lit(18)))
+      .cache())
+
+# check the time range filter
+hist_ist.select(hour(col("dep_actual")).alias("h")).distinct().orderBy("h").show()
+
+# +
+# sanity check, 1% of data sample
+sample = hist_ist.sample(fraction=0.01, seed=42)
+
+print("Sample size:", sample.count())
+
+# compute a few approximate quantiles
+arr_q = sample.approxQuantile("arr_delay_s", [0.1, 0.5, 0.9], 0.01)
+dep_q = sample.approxQuantile("dep_delay_s", [0.1, 0.5, 0.9], 0.01)
+print(f"arr_delay_s quantiles (10%,50%,90%): {arr_q}")
+print(f"dep_delay_s quantiles (10%,50%,90%): {dep_q}")
+
+sample.select("operating_day","arr_delay_s","dep_delay_s").show(5, truncate=False)
+
+# +
+# hourly delays percentile
+hourly_stats = (
+    hist_ist
+      .withColumn("dep_hour", hour(col("dep_actual")))
+      .groupBy("dep_hour")
+      .agg(
+        percentile_approx(col("arr_delay_s"), [0.5,0.75,0.9,0.95]).alias("arr_qs"),
+        percentile_approx(col("dep_delay_s"), [0.5,0.75,0.9,0.95]).alias("dep_qs"),
+        F.count("*").alias("n_trips"))
+      .orderBy("dep_hour")
+      .cache())
+
+# trigger 
+#hourly_stats.head(1)
+# -
+
+#sanity check
+# are all 24 hours present?
+distinct_hours = hourly_stats.select("dep_hour").distinct().orderBy("dep_hour")
+print("Hours covered:", [r.dep_hour for r in distinct_hours.collect()])
+hourly_stats.show(24, truncate=False)
+
+# ## Feature engineering
+
+# +
+# time features
+hist_feat = (
+    hist_ist
+        .withColumn("sched_dep_hour", hour(to_timestamp(col("dep_time"), "yyyy-MM-dd HH:mm:ss")))
+        .withColumn("act_dep_hour", hour(to_timestamp(col("dep_actual"), "yyyy-MM-dd HH:mm:ss")))
+        .withColumn("dow",((dayofweek(col("operating_day")) + 5) % 7) + 1) #days of week
+        .withColumn("day_of_year",dayofyear(col("operating_day")))
+        .cache())
+
+#trigger (for cache)
+#hist_feat.head(1)
+
+# +
+#sanity check
+sample_feat = hist_feat.sample(fraction=0.01, seed=42)
+sample_feat.printSchema()
+
+print("\nSample rows with time features:")
+sample_feat.select("dep_time","dep_actual","sched_dep_hour","act_dep_hour","operating_day","dow").limit(5).show(truncate=False)
+
+hours = sorted(r.sched_dep_hour for r in sample_feat.select("sched_dep_hour").distinct().collect())
+days  = sorted(r.dow for r in sample_feat.select("dow").distinct().collect())
+print(f"\nsched_dep_hour values in sample: {hours}")
+print(f"dow values in sample: {days}")
+# -
+
+
+# take interesting column
+hist_fact = hist_feat.select(
+    "bpuic",
+    "trip_id",
+    "arr_time",
+    "dep_time",
+    "arr_delay_s",
+    "sched_dep_hour",
+    "act_dep_hour",
+    "dow",
+    "day_of_year").cache()
+
+# +
+# stops_geo: bpuic, name, coords
+stops_geo = (spark.table("iceberg.sbb.stops")
+         .withColumn("bpuic", regexp_extract("stop_id", "(\\d+)", 1).cast("int"))
+         .select("bpuic", "stop_name", "stop_lat", "stop_lon"))
+
+# trip and route
+trips_df  = spark.table("iceberg.sbb.trips").select("trip_id", "route_id")
+routes_df = spark.table("iceberg.sbb.routes").select("route_id", "route_desc", "route_type")
+
+# +
+hist_route_station = (
+    hist_fact
+      .join(stops_geo, on="bpuic", how="left")
+      .join(trips_df, on="trip_id", how="left")
+      .join(routes_df, on="route_id", how="left")
+      .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
+      .withColumn("delay", col("arr_delay_s"))
+      .cache())
+
+hist_route_station.createOrReplaceTempView("hist_route_station")
+# -
+
+# sanity check
+hist_route_station.printSchema()
+
+# +
+# transfers per origin stop
+transfers = (
+    spark.table("iceberg.sbb.transfers")
+      .withColumn("from_bpuic", regexp_extract("from_stop_id", "(\\d+)", 1).cast("int"))
+      .withColumn("to_bpuic", regexp_extract("to_stop_id", "(\\d+)", 1).cast("int"))
+      .select("from_bpuic", "to_bpuic", "min_transfer_time"))
+
+transfer_stats = (
+    transfers
+        .groupBy("from_bpuic")
+        .agg(
+            Fmin("min_transfer_time").alias("min_transfer_time"),
+            Fcount("to_bpuic").alias("transfer_degree")))
+
+# join transfer
+feat_with_transfer = (
+    hist_route_station
+      .join(transfer_stats, hist_route_station.bpuic == transfer_stats.from_bpuic, how="left")
+      .drop("from_bpuic")
+      .na.fill({"min_transfer_time": 2, "transfer_degree": 0}))
+
+# weather
+feat_with_weather = (
+    feat_with_transfer
+        .withColumn("temperature", lit(0.0))
+        .withColumn("precipitation", lit(0.0))
+        .withColumn("wind_speed", lit(0.0))
+        .withColumn("hour_sin", sin(2 * lit(math.pi) * col("sched_dep_hour") / lit(24)))
+        .withColumn("hour_cos", cos(2 * lit(math.pi) * col("sched_dep_hour") / lit(24)))
+        .withColumn("doy_sin", sin(2 * lit(math.pi) * col("day_of_year") / lit(365)))
+        .withColumn("doy_cos", cos(2 * lit(math.pi) * col("day_of_year") / lit(365))))
+
+# final features col
+final_features = (
+    feat_with_weather
+      .select(
+         "trip_id", "bpuic", "route_id", "route_desc", "route_type",
+         "scheduled_tt", "delay", "sched_dep_hour", "act_dep_hour", "dow", 
+         "day_of_year", "hour_sin", "hour_cos", "doy_sin", "doy_cos", 
+         "stop_lat", "stop_lon", "transfer_degree", "min_transfer_time",
+         "temperature", "precipitation", "wind_speed").dropDuplicates())
+
+final_features.createOrReplaceTempView("segment_features")
+# -
+
+final_features.printSchema()
+
+# +
+# baseline quantiles for route, bpuic, sched_dep_hour
+baseline_qs = (
+    final_features
+      .groupBy("route_id", "bpuic", "sched_dep_hour")
+      .agg(
+          percentile_approx("delay", 0.50).alias("q50"),
+          percentile_approx("delay", 0.75).alias("q75"),
+          percentile_approx("delay", 0.90).alias("q90"),
+          percentile_approx("delay", 0.95).alias("q95"),
+          F.count("*").alias("n_obs"))
+      .cache())
+
+baseline_qs.createOrReplaceTempView("baseline_quantiles")
+# -
+
+baseline_qs.printSchema()
+
+# ## Hybrid Delay Model
+
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml import Pipeline
+from pyspark.sql.functions import col
+from pyspark.ml.feature    import VectorAssembler
+from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml            import Pipeline
+from pyspark.sql.functions import col, udf
+from pyspark.sql.types     import DoubleType
+
+# prepare hybrid dataframe
+# join in your baseline quantiles (q50, q75, ecc) that you computed earlier
+data = final_features.join(
+    baseline_qs.select("route_id","bpuic","sched_dep_hour","q50","q75","q90","q95"),
+    on=["route_id","bpuic","sched_dep_hour"], how="left").withColumn("resid_label", col("delay") - col("q50"))
+
+# split the dataset
+train, valid, test = data.randomSplit([0.7,0.15,0.15], seed=42)
+
+# +
+# sample test, take a small 5% sample of train to verify pipeline
+train_small = train.sample(fraction=0.05, seed=42)
+
+feature_cols = [
+    "scheduled_tt","sched_dep_hour","act_dep_hour",
+    "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
+    "stop_lat","stop_lon","transfer_degree","min_transfer_time",
+    "temperature","precipitation","wind_speed",
+    "q50"]  # include baseline median
+
+assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+
+rf_small = RandomForestRegressor(
+    labelCol="resid_label", featuresCol="features",
+    numTrees=10, maxDepth=5, seed=42)
+
+pipeline_small = Pipeline(stages=[assembler, rf_small])
+
+# fit and predict on the small sample
+model_small = pipeline_small.fit(train_small)
+preds_small = model_small.transform(valid).withColumn("pred_delay", col("q50")+col("prediction"))
+# -
+
+preds_small.select("delay","pred_delay").show(5)
+
+# +
+# train on full dataset
+
+rf = RandomForestRegressor(
+    labelCol="resid_label", featuresCol="features",
+    numTrees=100, maxDepth=10, seed=42)
+
+pipeline = Pipeline(stages=[assembler, rf])
+resid_model = pipeline.fit(train)
+print("train residual model complete")
+
+# +
+# calibrate quatiles offset on validation
+
+# point predictions + compute residuals on val
+vp = resid_model.transform(valid) \
+      .withColumn("pred_delay", col("q50") + col("prediction")) \
+      .withColumn("residual", col("delay") - col("pred_delay"))
+
+# approximate desired percentiles of residual
+qs = [0.5, 0.75, 0.9, 0.95]
+deltas = vp.stat.approxQuantile("residual", qs, 0.001)
+delta_by_q = dict(zip(qs, deltas))
+print("Residual shifts:", delta_by_q)
+
+# build UDFs to shift point forecast for each quantile
+def shift_udf(delta):
+    return udf(lambda p: float(p + delta), DoubleType())
+
+shifters = {q: shift_udf(delta_by_q[q]) for q in qs}
+
+# +
+# apply to test set and show final predictions
+
+tp = resid_model.transform(test) \
+     .withColumn("pred_delay", col("q50") + col("prediction"))
+
+for q in qs:
+    tp = tp.withColumn(f"pred_{int(q*100)}", shifters[q](col("pred_delay")))
+
+tp.select("delay","pred_delay","pred_50","pred_75","pred_90","pred_95") \
+  .show(5, truncate=False)
+
+# -
+
+
+
+
+
+'''#assemble your features
+feature_cols = [
+    "scheduled_tt", "sched_dep_hour", "act_dep_hour",
+    "dow", "day_of_year", "hour_sin", "hour_cos",
+    "doy_sin", "doy_cos", "stop_lat", "stop_lon",
+    "transfer_degree", "min_transfer_time",
+    "temperature", "precipitation", "wind_speed"]
+
+assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+
+#define the model (tune numTrees and maxDepth)
+rf = RandomForestRegressor(
+    featuresCol="features",
+    labelCol="delay",
+    predictionCol="prediction",
+    numTrees=100,
+    maxDepth=10,
+    seed=42)
+
+# build the pipeline and fit the model
+rf_pipeline = Pipeline(stages=[assembler, rf])
+rf_model = rf_pipeline.fit(train_df)
+print("RandomForest training complete")'''
+
+
+
+
+
+
+
+
+
+
+# ## Model validation
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# + [markdown] jp-MarkdownHeadingCollapsed=true
+# # IV. Route Planning Algorithm
+# -
+
+
+
+
+
+
+
+# + [markdown] jp-MarkdownHeadingCollapsed=true
 # # V. Validation
+# -
+
+
+
+
+
+
 
 spark.stop()
+
+# + [markdown] jp-MarkdownHeadingCollapsed=true
+# # OTHER STUFF, CHECK WHAT TO KEEP
+# -
 
 # ---
 # ⚠️ **Note**: all the data used in this homework is described in the [FINAL-PREVIEW](./final-preview.md) document, which can be found in this repository. The document describes the final project due for the end of this semester.
@@ -668,9 +1071,9 @@ import pandas as pd
 pd.read_sql(f"""SHOW TABLES IN {sharedNS}""", conn)
 
 
-# -
-
+# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ## Part I. 10 Points
+# -
 
 # ### a) Declare an SQL result generator - 2/10
 #
@@ -1199,7 +1602,9 @@ fig.show()
 
 # ---
 
+# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ## Part II. 50 Points
+# -
 
 # In this second Part, we will leverage the historical SBB data to model the public transport infrastructure within the Lausanne region.
 #
@@ -1669,7 +2074,9 @@ pd.read_sql_query(query, conn)
 # This approach helps save computational resources by avoiding the need to recalculate common search queries each time.
 #
 
+# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### h) Isochrone Map - 15/50
+# -
 
 # Note: This question is open-ended, and credits will be allocated based on the quality of both the proposed algorithm and its implementation. You will receive credits for proposing a robust algorithm, even if you do not carry out the implementation.
 #
@@ -2107,8 +2514,8 @@ display(widgets.VBox([
 
 # +
 ### TODO - Others as you see fit.
-# -
 
+# + [markdown] jp-MarkdownHeadingCollapsed=true
 # # General Considerations and Questions About the Algorithm
 #
 # While working on 2h, I had a few considerations and thoughts about the realism of the current implementation and question:
@@ -2120,6 +2527,7 @@ display(widgets.VBox([
 # In the example below, during trip 727.TA.92-21-I-j24-1.12.H on a Monday, lines 2 and 3 have identical departure and arrival times, even though they correspond to two different stops. A similar issue occurs on lines 11 and 12. 
 #
 # This is unrealistic, as traveling between any two stops should take at least one minute. As a result, our algorithm sometimes shows transit segments with 0-minute durations. 
+# -
 
 query = f"""
 SELECT *
