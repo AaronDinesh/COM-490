@@ -1,17 +1,20 @@
+# -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
+#     custom_cell_magics: kql
 #     text_representation:
 #       extension: .py
-#       format_name: light
-#       format_version: '1.5'
-#       jupytext_version: 1.16.6
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.11.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
+# %% [markdown]
 # # __Final Assignment: Robust Journey Planning__
 # ---
 #
@@ -21,13 +24,16 @@
 # - In-progress code (not necessarily functional) is due before __May 26th, 23:59__, final code is due before __May 30, 23:59 CEST__
 #
 
+# %% [markdown]
 # # Introduction
 
+# %% [markdown]
 # # I. Data Cleaning and Pre-processing
 
+# %% [markdown]
 # ## Setting up namespace, Spark session, and imports:
 
-# +
+# %%
 # ## Configuration and Imports
 import os
 import pwd
@@ -49,7 +55,21 @@ print(f"hadoopFSs={hadoopFS}")
 print(f"username={username}")
 print(f"group={groupName}")
 
-# -
+
+# %%
+try:
+    if 'spark' in locals() and spark: # Check if spark exists and is not None
+        print("Stopping existing SparkSession...")
+        spark.stop()
+        print("SparkSession stopped.")
+except NameError:
+    print("No existing SparkSession to stop.") # spark variable doesn't exist yet
+except Exception as e:
+    print(f"Error stopping SparkSession: {e}")
+
+print("Creating new SparkSession...")
+
+
 
 spark = SparkSession\
             .builder\
@@ -66,58 +86,78 @@ spark = SparkSession\
             .config('spark.sql.catalog.spark_catalog.warehouse', f'{hadoopFS}/user/{username}/final_project/warehouse')\
             .config("spark.sql.warehouse.dir", f'{hadoopFS}/user/{username}/final_project/spark/warehouse')\
             .config('spark.eventLog.gcMetrics.youngGenerationGarbageCollectors', 'G1 Young Generation')\
-            .config("spark.executor.memory", "6g")\
-            .config("spark.executor.cores", "4")\
+            .config("spark.executor.memory", "10g")\
+            .config("spark.executor.cores", "2")\
             .config("spark.executor.instances", "4")\
             .master('yarn')\
             .getOrCreate()
 
+# %%
 spark.sparkContext
 
+# %%
 spark.sql(f'CREATE SCHEMA IF NOT EXISTS spark_catalog.{username}')
 spark.sql(f'USE spark_catalog.{username}')
 spark.sql(f'SHOW CATALOGS').show(truncate=False)
 
+# %% [markdown]
 # ## Exploring tables and schemas:
 
+# %%
 spark.sql(f'SHOW SCHEMAS').show(truncate=False)
 
+# %%
 spark.sql(f'SHOW TABLES').show(truncate=False)
 
+# %%
 spark.sql(f'SHOW SCHEMAS IN iceberg').show(truncate=False)
 
+# %%
 spark.sql(f'SHOW TABLES IN iceberg.sbb').show(truncate=False)
 
+# %%
 spark.sql(f'SHOW TABLES IN iceberg.geo').show(truncate=False)
 
+# %%
 spark.sql(f'SELECT * FROM iceberg.sbb.stop_times LIMIT 1').show(truncate=False,vertical=True)
 
+# %%
 spark.sql(f'SELECT * FROM iceberg.sbb.trips LIMIT 1').show(truncate=False,vertical=True)
 
+# %%
 spark.sql(f'SELECT * FROM iceberg.sbb.routes LIMIT 1').show(truncate=False,vertical=True)
 
+# %%
 spark.sql(f'SELECT * FROM iceberg.sbb.calendar LIMIT 1').show(truncate=False,vertical=True)
 
+# %%
 spark.sql(f'SELECT * FROM iceberg.sbb.calendar_dates LIMIT 1').show(truncate=False,vertical=True)
 
+# %%
 spark.sql(f'SELECT * FROM iceberg.sbb.istdaten LIMIT 1').show(truncate=False,vertical=True)
 
+# %% [markdown]
 # ## Loading Weather data:
 
+# %%
 spark.read.options(header=True).csv(f'/data/com-490/csv/weather_stations').withColumns({
       'lat': F.col('lat').cast('double'),
       'lon': F.col('lon').cast('double'),
     }).createOrReplaceTempView("weather_stations")
 
+# %%
 spark.sql(f'SELECT * FROM weather_stations').printSchema()
 
+# %%
 spark.sql(f'SHOW TABLES').show(truncate=False)
 
+# %%
 spark.sql(f'SELECT * FROM weather_stations LIMIT 5').toPandas()
 
+# %% [markdown]
 # ## Define Project Parameters:
 
-# +
+# %%
 
 # ---
 # ## Define Project Parameters
@@ -154,11 +194,10 @@ print(f"Max Walking Distance: {MAX_WALKING_DISTANCE_METERS}m")
 print(f"Walking Speed: {WALKING_SPEED_MPS:.2f} m/s")
 
 
-# -
-
+# %% [markdown]
 # ## Defining some Helper Functions for later:
 
-# +
+# %%
 def haversine_distance_udf(lat1, lon1, lat2, lon2):
     if None in [lat1, lon1, lat2, lon2]: return None
     R = 6371000
@@ -177,11 +216,11 @@ def parse_gtfs_time_udf(time_str):
     except Exception: return None
 
 
-# -
-
+# %% [markdown]
 # ## Loading Data:
 #
 
+# %%
 stops = spark.table("iceberg.sbb.stops")
 trips = spark.table("iceberg.sbb.trips")
 transfers = spark.table("iceberg.sbb.transfers")
@@ -193,21 +232,26 @@ istdaten = spark.table("iceberg.sbb.istdaten")
 geo = spark.table("iceberg.geo.shapes")
 weather = spark.table("weather_stations")
 
+# %% [markdown]
 # ## Initial filtering of data:
 #
 
+# %% [markdown]
 # ### Filter Calendar to only include mon-fri trips
 
+# %%
 calendar_f = calendar.filter((calendar.monday == True) & (calendar.tuesday == True)
                                 & (calendar.wednesday == True) & (calendar.thursday == True) 
                                 & (calendar.friday == True) & (calendar.saturday == False) 
                                 & (calendar.sunday == False))
 
+# %% [markdown]
 # ### Join trips table to calendar
 
+# %% [markdown]
 # Join trips table to filtered calendar table to only include weekday trips
 
-# +
+# %%
 # Get the filtered calendar_ids
 ids = calendar_f.select(calendar_f.service_id).distinct()
 
@@ -215,22 +259,24 @@ ids = calendar_f.select(calendar_f.service_id).distinct()
 trips_f = trips.join(ids, 'service_id', 'inner').select(['service_id', 'route_id', 'trip_id'])
 trips_f = trips_f.join(routes, 'route_id', 'inner').select(['service_id', 'route_id', 'trip_id','route_desc','route_type'])
 trips_f.show(3)
-# -
 
+# %% [markdown]
 # ### Filter stops table
 
+# %% [markdown]
 # Filter stops table to only include stops in the Lausanne region
 
+# %% [markdown]
 # #### Setup Trino for Geospacial queries:
 
-# +
+# %%
 import os
 import warnings
 
 warnings.simplefilter(action='ignore', category=UserWarning)
 warnings.filterwarnings("ignore", category=UserWarning, message="pandas only supports SQLAlchemy connectable .*")
 
-# +
+# %%
 import base64 as b64
 import json
 import time
@@ -248,14 +294,14 @@ def getUsername():
     return obj.get('sub'), time_left
 
 
-# +
+# %%
 username, validity_h = getUsername()
 hadoopFS = os.environ.get('HADOOP_FS')
 namespace = 'iceberg.' + username
 sharedNS = 'iceberg.com490_iceberg'
 
 if not re.search('[A-Z][0-9]', groupName):
-    raise Exception('Invalid group name {groupName}')
+    raise Exception(f'Invalid group name {groupName}')
 
 print(f"you are: {username}")
 print(f"credentials validity: {validity_h} hours left.")
@@ -263,7 +309,7 @@ print(f"shared namespace is: {sharedNS}")
 print(f"your namespace is: {namespace}")
 print(f"your group is: {groupName}")
 
-# +
+# %%
 import trino
 from contextlib import closing
 from urllib.parse import urlparse
@@ -285,15 +331,17 @@ conn = connect(
 )
 
 print('Connected!')
-# -
 
+# %% [markdown]
 # #### Perform the stop geofiltering using trino:
 
+# %% [markdown]
 # lausanne_region = geo.select('wkb_geometry')\
 #             .filter(F.lower(F.col("name")).isin([name.lower() for name in region_names]))
 # lausanne_region.show(3)
 
 
+# %%
 query = f"""
 WITH lausanne_region AS (
     SELECT wkb_geometry
@@ -327,7 +375,7 @@ FROM geo_filtered_stops
 WHERE rn = 1
 """
 
-# +
+# %%
 # Fetch with Trino, convert to Pandas
 with closing(conn.cursor()) as cur:
     cur.execute(query)
@@ -336,19 +384,20 @@ with closing(conn.cursor()) as cur:
 
 pdf = pd.DataFrame(rows, columns=cols)
 
-# +
+ # %%
  # Convert to Spark DataFrame
 stops_lausanne = spark.createDataFrame(pdf)
 
 # (optional) inspect
 stops_lausanne.printSchema()
 print("Rows fetched:", stops_lausanne.count())
-# -
 
+# %%
 stops_lausanne
 # ### Getting stops with realtime data for Lausanne region:
 
 
+# %%
 from pyspark.sql.functions import col, regexp_extract, lit, when
 # 1) Build the ist_july DataFrame
 ist_july_df = istdaten.filter((col("operating_day") >= lit("2024-07-01")) &\
@@ -356,6 +405,7 @@ ist_july_df = istdaten.filter((col("operating_day") >= lit("2024-07-01")) &\
       .select(regexp_extract(col("bpuic").cast("string"), "(\\d+)", 1).alias("bpuic"))\
       .distinct()
 
+# %%
 stops_lausanne = stops_lausanne.select(\
           col("stop_id"),\
           col("stop_name"),\
@@ -365,11 +415,13 @@ stops_lausanne = stops_lausanne.select(\
       )\
       .distinct()
 
+# %%
 stops_lausanne.show(3)
 
+# %%
 stops_lausanne.count()
 
-# +
+# %%
 # rename the ist_july bpuic so we can see NULLs on misses
 ist_july_key = ist_july_df.select(col("bpuic").alias("bpuic_rt"))
 
@@ -379,12 +431,12 @@ stops_lausanne = (
       .withColumn("has_realtime", col("bpuic_rt").isNotNull())
       .drop("bpuic_rt")       # no longer needed
 )
-# -
 
+# %%
 stops_lausanne.printSchema()
 stops_lausanne.show(5)
 
-# +
+# %%
 from pyspark.sql.functions import avg, col
 result = (\
     stops_lausanne\
@@ -394,53 +446,61 @@ result = (\
 
 print(f"{result:.2f}% of stops have no realtime data")
 
-# +
+# %%
 # Find the stop with ID 8592108
 stop_8592108 = stops_lausanne.filter(col("stop_id") == "8592108")
 
 # Show the result
 stop_8592108.show(truncate=False)
-# -
 
+# %%
 ist_july_df.filter(col('bpuic')=="8592108").show(truncate=False)
 
+# %% [markdown]
 # ### Filtering Stop times:
 #
 
+# %% [markdown]
 # #### Filtering weekday trips:
 
-# +
+# %%
 import plotly.express as px
 fig = px.scatter_map(data_frame=stops_lausanne, lat="stop_lat", lon="stop_lon", color="has_realtime", hover_name="stop_name")
 
 fig.show()
-# -
 
+# %% [markdown]
 # #### Filtering stop times in the Laus
 
+# %%
 stops_lausanne_rt = stops_lausanne.filter(col("has_realtime") == True)
 
 
+# %%
 stops_lausanne_rt.writeTo(f"""{namespace}.sbb_stops_lausanne_region""")\
     .using("iceberg")
 
+# %% [markdown]
 # # II. Public Transport Network Model
 
+# %%
 # %pip install networkx
 
+# %%
 # !pip install networkx
 
+# %%
 # ensure the personal spark catalog exist
 username, _ = getUsername()
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS spark_catalog.{username}")
 
-# +
+# %%
 stops_lausanne_rt.createOrReplaceTempView("stops_lausanne_rt")
 
 # sanity check
 spark.sql("SHOW TABLES").filter("tableName = 'stops_lausanne_rt'").show()
 
-# +
+# %%
 business_hours_start = '07:00:00'
 business_hours_end = '17:59:59'
 
@@ -459,12 +519,13 @@ stop_times_df = (
       .filter((col("departure_time") >= lit(business_hours_start)) &
               (col("arrival_time")   <= lit(business_hours_end)))
       .select("trip_id", "stop_id", "departure_time", "arrival_time"))
-# -
 
+# %%
 #sanity check
 print("tot filtered rows:", stop_times_df.count())
 stop_times_df.show(5, truncate=False)
 
+# %%
 '''business_hours_start = '07:00:00'
 business_hours_end = '17:59:59'
 
@@ -490,20 +551,22 @@ with closing(conn.cursor()) as cur:
 
 stop_times_df = spark.createDataFrame(pd.DataFrame(rows, columns=cols))'''
 
+# %%
 joined_df = stops_lausanne.join(stop_times_df, 'stop_id', 'inner')
 
 
+# %%
 joined_df.printSchema()
 joined_df.show(5)
 
-# +
+# %%
 from pyspark.sql.functions import udf
 from pyspark.sql.types import DoubleType
 import math
 
 haversine_distance_udf = udf(haversine_distance_udf, DoubleType())
 
-# +
+# %%
 pairwise_distances = stops_lausanne.alias("a").crossJoin(stops_lausanne.alias("b")) \
     .filter(col("a.stop_id") != col("b.stop_id")) \
     .select(
@@ -521,7 +584,7 @@ stop_to_stop_df.show(5)
 stop_to_stop_df.printSchema()
 
 
-# +
+# %%
 from pyspark.sql.functions import to_timestamp
 
 lausanne_stop_times = joined_df.withColumn(
@@ -530,7 +593,7 @@ lausanne_stop_times = joined_df.withColumn(
     "arrival_td", to_timestamp("arrival_time", "HH:mm:ss")
 )
 
-# +
+# %%
 import networkx as nx
 from datetime import timedelta
 
@@ -593,11 +656,12 @@ for row in stop_to_stop_list:
 
 print(f"Nodes: {len(G.nodes)}")
 print(f"Edges: {len(G.edges)}")
-# -
 
 
+# %% [markdown]
 # # III. Predictive Model
 
+# %%
 # import libraries
 from pyspark.sql import functions as F
 from pyspark.sql.functions import unix_timestamp, col, lit
@@ -612,8 +676,10 @@ from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import GBTRegressor
 from pyspark.ml import Pipeline
 
+# %% [markdown]
 # ## Historical delay data
 
+# %%
 # historical data
 hist_ist = (
     istdaten
@@ -627,10 +693,11 @@ hist_ist = (
       .filter((hour(col("dep_actual")) >= lit(7)) & (hour(col("dep_actual")) < lit(18)))
       .cache())
 
+# %%
 # check the time range filter
 hist_ist.select(hour(col("dep_actual")).alias("h")).distinct().orderBy("h").show()
 
-# +
+# %%
 # sanity check, 1% of data sample
 sample = hist_ist.sample(fraction=0.01, seed=42)
 
@@ -644,7 +711,7 @@ print(f"dep_delay_s quantiles (10%,50%,90%): {dep_q}")
 
 sample.select("operating_day","arr_delay_s","dep_delay_s").show(5, truncate=False)
 
-# +
+# %%
 # hourly delays percentile
 hourly_stats = (
     hist_ist
@@ -659,17 +726,18 @@ hourly_stats = (
 
 # trigger 
 #hourly_stats.head(1)
-# -
 
+# %%
 #sanity check
 # are all 24 hours present?
 distinct_hours = hourly_stats.select("dep_hour").distinct().orderBy("dep_hour")
 print("Hours covered:", [r.dep_hour for r in distinct_hours.collect()])
 hourly_stats.show(24, truncate=False)
 
+# %% [markdown]
 # ## Feature engineering
 
-# +
+# %%
 # time features
 hist_feat = (
     hist_ist
@@ -682,7 +750,7 @@ hist_feat = (
 #trigger (for cache)
 #hist_feat.head(1)
 
-# +
+# %%
 #sanity check
 sample_feat = hist_feat.sample(fraction=0.01, seed=42)
 sample_feat.printSchema()
@@ -694,9 +762,9 @@ hours = sorted(r.sched_dep_hour for r in sample_feat.select("sched_dep_hour").di
 days  = sorted(r.dow for r in sample_feat.select("dow").distinct().collect())
 print(f"\nsched_dep_hour values in sample: {hours}")
 print(f"dow values in sample: {days}")
-# -
 
 
+# %%
 # take interesting column
 hist_fact = hist_feat.select(
     "bpuic",
@@ -709,7 +777,7 @@ hist_fact = hist_feat.select(
     "dow",
     "day_of_year").cache()
 
-# +
+# %%
 # stops_geo: bpuic, name, coords
 stops_geo = (spark.table("iceberg.sbb.stops")
          .withColumn("bpuic", regexp_extract("stop_id", "(\\d+)", 1).cast("int"))
@@ -719,7 +787,7 @@ stops_geo = (spark.table("iceberg.sbb.stops")
 trips_df  = spark.table("iceberg.sbb.trips").select("trip_id", "route_id")
 routes_df = spark.table("iceberg.sbb.routes").select("route_id", "route_desc", "route_type")
 
-# +
+# %%
 hist_route_station = (
     hist_fact
       .join(stops_geo, on="bpuic", how="left")
@@ -730,12 +798,12 @@ hist_route_station = (
       .cache())
 
 hist_route_station.createOrReplaceTempView("hist_route_station")
-# -
 
+# %%
 # sanity check
 hist_route_station.printSchema()
 
-# +
+# %%
 # transfers per origin stop
 transfers = (
     spark.table("iceberg.sbb.transfers")
@@ -779,11 +847,11 @@ final_features = (
          "temperature", "precipitation", "wind_speed").dropDuplicates())
 
 final_features.createOrReplaceTempView("segment_features")
-# -
 
+# %%
 final_features.printSchema()
 
-# +
+# %%
 # baseline quantiles for route, bpuic, sched_dep_hour
 baseline_qs = (
     final_features
@@ -797,32 +865,34 @@ baseline_qs = (
       .cache())
 
 baseline_qs.createOrReplaceTempView("baseline_quantiles")
-# -
 
+# %%
 baseline_qs.printSchema()
 
+# %% [markdown]
 # ## Hybrid Delay Model
 
+# %%
+TRAINING = True
+
 from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.regression import RandomForestRegressor
-from pyspark.ml import Pipeline
-from pyspark.sql.functions import col
-from pyspark.ml.feature    import VectorAssembler
 from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml            import Pipeline
 from pyspark.sql.functions import col, udf
 from pyspark.sql.types     import DoubleType
 
+# %%
 # prepare hybrid dataframe
 # join in your baseline quantiles (q50, q75, ecc) that you computed earlier
 data = final_features.join(
     baseline_qs.select("route_id","bpuic","sched_dep_hour","q50","q75","q90","q95"),
     on=["route_id","bpuic","sched_dep_hour"], how="left").withColumn("resid_label", col("delay") - col("q50"))
 
+# %%
 # split the dataset
 train, valid, test = data.randomSplit([0.7,0.15,0.15], seed=42)
 
-# +
+# %%
 # sample test, take a small 5% sample of train to verify pipeline
 train_small = train.sample(fraction=0.05, seed=42)
 
@@ -841,62 +911,229 @@ rf_small = RandomForestRegressor(
 
 pipeline_small = Pipeline(stages=[assembler, rf_small])
 
-# fit and predict on the small sample
-model_small = pipeline_small.fit(train_small)
-preds_small = model_small.transform(valid).withColumn("pred_delay", col("q50")+col("prediction"))
-# -
+if TRAINING:
+    # fit and predict on the small sample
+    model_small = pipeline_small.fit(train_small)
+    preds_small = model_small.transform(valid).withColumn("pred_delay", col("q50")+col("prediction"))
+else:
+    print("Skipping Training the model")
 
-preds_small.select("delay","pred_delay").show(5)
+# %%
+if TRAINING:
+    preds_small.select("delay","pred_delay").show(5)
 
-# +
-# train on full dataset
+# %%
+if TRAINING:
+    # train on full dataset
 
-rf = RandomForestRegressor(
-    labelCol="resid_label", featuresCol="features",
-    numTrees=100, maxDepth=10, seed=42)
+    rf = RandomForestRegressor(
+        labelCol="resid_label", featuresCol="features",
+        numTrees=100, maxDepth=10, seed=42)
 
-pipeline = Pipeline(stages=[assembler, rf])
-resid_model = pipeline.fit(train)
-print("train residual model complete")
+    pipeline = Pipeline(stages=[assembler, rf])
+    resid_model = pipeline.fit(train)
+    print("train residual model complete")
+else:
+    print("Skipping Training the model")
 
-# +
-# calibrate quatiles offset on validation
+# %% [markdown]
+# ## Inital Validation
+# Here we calculate the performance of our model before doing hyperparameter tuning. Since we are doing regression, our performance metric is Root Mean Squared Error (RMSE).
 
-# point predictions + compute residuals on val
-vp = resid_model.transform(valid) \
-      .withColumn("pred_delay", col("q50") + col("prediction")) \
-      .withColumn("residual", col("delay") - col("pred_delay"))
+# %%
+if TRAINING:
+    # calibrate quatiles offset on validation
+    from pyspark.ml.evaluation import RegressionEvaluator
+    # point predictions + compute residuals on val
+    vp = resid_model.transform(valid) \
+          .withColumn("pred_delay", col("q50") + col("prediction")) \
+          .withColumn("residual", col("delay") - col("pred_delay"))
 
-# approximate desired percentiles of residual
-qs = [0.5, 0.75, 0.9, 0.95]
-deltas = vp.stat.approxQuantile("residual", qs, 0.001)
-delta_by_q = dict(zip(qs, deltas))
-print("Residual shifts:", delta_by_q)
+    # approximate desired percentiles of residual
+    qs = [0.5, 0.75, 0.9, 0.95]
+    deltas = vp.stat.approxQuantile("residual", qs, 0.001)
+    delta_by_q = dict(zip(qs, deltas))
+    print("Residual shifts:", delta_by_q)
 
-# build UDFs to shift point forecast for each quantile
-def shift_udf(delta):
-    return udf(lambda p: float(p + delta), DoubleType())
+    # build UDFs to shift point forecast for each quantile
+    def shift_udf(delta):
+        return udf(lambda p: float(p + delta), DoubleType())
 
-shifters = {q: shift_udf(delta_by_q[q]) for q in qs}
+    shifters = {q: shift_udf(delta_by_q[q]) for q in qs}
 
-# +
-# apply to test set and show final predictions
+    rmse_results = {}
+    for q_value, shifter_udf in shifters.items():
+        calibrated_pred_col_name = f"pred_{int(q_value * 100)}" # e.g., "pred_50", "pred_75"
 
-tp = resid_model.transform(test) \
-     .withColumn("pred_delay", col("q50") + col("prediction"))
+        # Apply the shifter UDF to the 'pred_delay' column
+        vp = vp.withColumn(calibrated_pred_col_name, shifter_udf(col("pred_delay")))
 
-for q in qs:
+        # Initialize the evaluator for this specific calibrated prediction
+        evaluator = RegressionEvaluator(
+            labelCol="delay",  # The actual true delay
+            predictionCol=calibrated_pred_col_name,
+            metricName="rmse"
+        )
+
+        # Compute RMSE
+        rmse = evaluator.evaluate(vp)
+        rmse_results[calibrated_pred_col_name] = rmse
+        print(f"RMSE for {calibrated_pred_col_name} against actual delay: {rmse}")
+
+    # Display the calibrated predictions and actual delay for a few rows
+    vp.select("delay", "pred_delay", "pred_50", "pred_75", "pred_90", "pred_95").show(5, truncate=False)
+
+    # Print all RMSE results
+    print("\nSummary of RMSE for calibrated quantile predictions:")
+    for pred_col, rmse_val in rmse_results.items():
+        print(f" - {pred_col}: {rmse_val}")
+else:
+    print("Skipping Validation step since TRAINING is false")
+
+    
+
+# %% [markdown]
+# ### Hyperparameter Tuning
+#
+# Now that we can train the model, we conduct some hyperparamter tuning experiments to further improve the model. We will
+# use the train and test set to perform the tuning and then evaluate the final model on the validation set.
+
+# %%
+if TRAINING:
+    from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+    from pyspark.ml.evaluation import RegressionEvaluator
+    from pyspark.ml import Pipeline
+    from pyspark.sql import functions as F
+    import numpy as np # ensure numpy is imported for np.bool_ if needed by older pyspark versions
+    np.bool = np.bool_ # For compatibility if older pyspark version uses it.
+
+
+    # We define the grid of parameters that we want to optimize over
+    paramGrid_rf = (ParamGridBuilder()
+                    .addGrid(rf.numTrees, [20, 50, 100])      # Number of trees
+                    .addGrid(rf.maxDepth, [5, 10, 15])        # Maximum depth of the trees
+                    .addGrid(rf.maxBins, [32, 64])            # Max number of bins for discretizing 
+                    .build())
+
+    print("RandomForestRegressor, ParamGrid, and Pipeline defined.")
+    print(f"RandomForest labelCol: {rf.getLabelCol()}, featuresCol: {rf.getFeaturesCol()}")
+    print(f"Number of models to train in CrossValidator for RF: {len(paramGrid_rf)}")
+
+    evaluator_rf = RegressionEvaluator(labelCol="resid_label", predictionCol="prediction", metricName="rmse")
+
+    cv_rf = CrossValidator(estimator=pipeline_rf,
+                           estimatorParamMaps=paramGrid_rf,
+                           evaluator=evaluator_rf,
+                           numFolds=3,  # Use 3 folds for cross-validation. Adjust as needed.
+                           seed=42,
+                           parallelism=4) # Number of models to train in parallel
+
+    print(f"Evaluator metric for RF: {evaluator_rf.getMetricName()}")
+    print(f"CrossValidator numFolds for RF: {cv_rf.getNumFolds()}")
+    print("Starting CrossValidator model fitting for RandomForestRegressor on the training data...")
+    cvModel_rf = cv_rf.fit(train)
+    print("CrossValidator model fitting for RandomForestRegressor completed.")
+    resid_model = cvModel_rf.bestModel
+else:
+    print("Skipping Cross Validation step since TRAINING is false")
+
+# %%
+if TRAINING:
+    # calibrate quatiles offset on validation
+
+    # point predictions + compute residuals on val
+    vp = resid_model.transform(valid) \
+          .withColumn("pred_delay", col("q50") + col("prediction")) \
+          .withColumn("residual", col("delay") - col("pred_delay"))
+
+    # approximate desired percentiles of residual
+    qs = [0.5, 0.75, 0.9, 0.95]
+    deltas = vp.stat.approxQuantile("residual", qs, 0.001)
+    delta_by_q = dict(zip(qs, deltas))
+    print("Residual shifts:", delta_by_q)
+
+    # build UDFs to shift point forecast for each quantile
+    def shift_udf(delta):
+        return udf(lambda p: float(p + delta), DoubleType())
+
+    shifters = {q: shift_udf(delta_by_q[q]) for q in qs}
+
+    rmse_results = {}
+
+    for q_value, shifter_udf in shifters.items():
+        calibrated_pred_col_name = f"pred_{int(q_value * 100)}" # e.g., "pred_50", "pred_75"
+
+        # Apply the shifter UDF to the 'pred_delay' column
+        vp = vp.withColumn(calibrated_pred_col_name, shifter_udf(col("pred_delay")))
+
+        # Initialize the evaluator for this specific calibrated prediction
+        evaluator = RegressionEvaluator(
+            labelCol="delay",  # The actual true delay
+            predictionCol=calibrated_pred_col_name,
+            metricName="rmse"
+        )
+
+        # Compute RMSE
+        rmse = evaluator.evaluate(vp)
+        rmse_results[calibrated_pred_col_name] = rmse
+        print(f"RMSE for {calibrated_pred_col_name} against actual delay: {rmse}")
+
+    # Display the calibrated predictions and actual delay for a few rows
+    vp.select("delay", "pred_delay", "pred_50", "pred_75", "pred_90", "pred_95").show(5, truncate=False)
+
+    # Print all RMSE results
+    print("\nSummary of RMSE for calibrated quantile predictions:")
+    for pred_col, rmse_val in rmse_results.items():
+        print(f" - {pred_col}: {rmse_val}")
+else:
+    print("Skipping validation of best model since TRAINING is false")
+ 
+
+
+# %%
+if TRAINING:
+  # apply to test set and show final predictions
+
+  tp = resid_model.transform(test) \
+       .withColumn("pred_delay", col("q50") + col("prediction"))
+
+  rmse_results = {}
+  for q in qs:
     tp = tp.withColumn(f"pred_{int(q*100)}", shifters[q](col("pred_delay")))
 
-tp.select("delay","pred_delay","pred_50","pred_75","pred_90","pred_95") \
-  .show(5, truncate=False)
+  for q_value, shifter_udf in shifters.items():
+    calibrated_pred_col_name = f"pred_{int(q_value * 100)}" # e.g., "pred_50", "pred_75"
 
-# -
+    # Initialize the evaluator for this specific calibrated prediction
+    evaluator = RegressionEvaluator(
+        labelCol="delay",  # The actual true delay
+        predictionCol=calibrated_pred_col_name,
+        metricName="rmse"
+    )
+
+    # Compute RMSE
+    rmse = evaluator.evaluate(tp)
+    rmse_results[calibrated_pred_col_name] = rmse
+    print(f"RMSE for {calibrated_pred_col_name} against actual delay: {rmse}")
+
+  # Print all RMSE results
+  print("\nSummary of RMSE for calibrated quantile predictions:")
+  for pred_col, rmse_val in rmse_results.items():
+      print(f" - {pred_col}: {rmse_val}")
+
+  tp.select("delay","pred_delay","pred_50","pred_75","pred_90","pred_95") \
+    .show(5, truncate=False)
+else:
+  print("Skipping testing of best model since TRAINING is false")
+
+# %%
+# Saving the best model
 
 
+# %%
 
 
-
+# %%
 '''#assemble your features
 feature_cols = [
     "scheduled_tt", "sched_dep_hour", "act_dep_hour",
@@ -921,56 +1158,56 @@ rf_pipeline = Pipeline(stages=[assembler, rf])
 rf_model = rf_pipeline.fit(train_df)
 print("RandomForest training complete")'''
 
+# %%
+
+# %%
+
+# %%
+
+# %%
 
 
-
-
-
-
-
-
-
+# %% [markdown]
 # ## Model validation
 
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
 
 
-
-
-
-
-
-
-
-
-
-
-
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # IV. Route Planning Algorithm
-# -
+# %%
+
+# %%
+
+# %%
 
 
-
-
-
-
-
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # V. Validation
-# -
+# %%
+
+# %%
+
+# %%
 
 
-
-
-
-
-
+# %%
 spark.stop()
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # OTHER STUFF, CHECK WHAT TO KEEP
-# -
 
+# %% [markdown]
 # ---
 # ⚠️ **Note**: all the data used in this homework is described in the [FINAL-PREVIEW](./final-preview.md) document, which can be found in this repository. The document describes the final project due for the end of this semester.
 #
@@ -990,6 +1227,7 @@ spark.stop()
 # * _namespace_:
 #     * Your personal namespace.
 
+# %% [markdown]
 # <div style="font-size: 100%" class="alert alert-block alert-warning">
 #     <b>Fair cluster Usage:</b>
 #     <br>
@@ -1000,14 +1238,14 @@ spark.stop()
 #     <b>Try to use as much SQL as possible and avoid using pandas operations.</b>
 # </div>
 
-# +
+# %%
 import os
 import warnings
 
 warnings.simplefilter(action='ignore', category=UserWarning)
 warnings.filterwarnings("ignore", category=UserWarning, message="pandas only supports SQLAlchemy connectable .*")
 
-# +
+# %%
 import base64 as b64
 import json
 import time
@@ -1024,7 +1262,7 @@ def getUsername():
     return obj.get('sub'), time_left
 
 
-# +
+# %%
 username, validity_h = getUsername()
 hadoopFS = os.environ.get('HADOOP_FS')
 namespace = 'iceberg.' + username
@@ -1038,11 +1276,11 @@ print(f"credentials validity: {validity_h} hours left.")
 print(f"shared namespace is: {sharedNS}")
 print(f"your namespace is: {namespace}")
 print(f"your group is: {groupName}")
-# -
 
+# %% [markdown]
 # ---
 
-# +
+# %%
 import trino
 from contextlib import closing
 from urllib.parse import urlparse
@@ -1065,22 +1303,23 @@ conn = connect(
 
 print('Connected!')
 
-# +
+# %%
 import pandas as pd
 
 pd.read_sql(f"""SHOW TABLES IN {sharedNS}""", conn)
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # ## Part I. 10 Points
-# -
 
+# %% [markdown]
 # ### a) Declare an SQL result generator - 2/10
 #
 # Complete the Python generator below to execute a single query or a list of queries, returning the results row by row.
 #
 # The generator should implement an out-of-core approach, meaning it should limit memory usage by fetching results incrementally, rather than loading all data into memory at once.
 
+# %%
 def sql_fetch(queries, conn, batch_size=100, with_column_names=True):
     if isinstance(queries, str):
         queries = [queries]
@@ -1100,13 +1339,14 @@ def sql_fetch(queries, conn, batch_size=100, with_column_names=True):
                     yield row
 
 
+# %% [markdown]
 # ### b) Explore SBB data - 3/10
 #
 # Explore the _{sharedNS}.sbb_istdaten_, _{sharedNS}.sbb_stops_, and _{sharedNS}.sbb_stop_times_ tables.
 #
 # Identify the field(s) used across all three tables to represent stop locations. Analyze their value ranges, format patterns, null and invalid values, and identify any years when null or invalid values are more prevalent. Use this information to implement the necessary transformations for reliably joining the tables on these stop locations.
 
-# +
+# %%
 ### TODO
 # Inspect the first couple lines of the three tables:
 from itertools import islice
@@ -1129,8 +1369,7 @@ for table in tables:
     pretty_table(table, query, conn,5)
 
 
-# -
-
+# %% [markdown]
 # The stop fields in each table are:
 #
 # <b>sbb_istdaten:</b>
@@ -1144,7 +1383,7 @@ for table in tables:
 # <b>sbb_stop_times:</b>
 # - stop_id
 
-# +
+# %%
 # Preparing the queries:
 
 def basic_info(table, cols, sample = False, sample_rate = 0.1):
@@ -1163,23 +1402,24 @@ def basic_info(table, cols, sample = False, sample_rate = 0.1):
     return query
 
 
-# -
-
-
+# %%
 query = basic_info("sbb_istdaten", ["bpuic", "stop_name"])
 pretty_table('sbb_istdaten', query, conn)
 
+# %%
 query = basic_info("sbb_stops", ["stop_id", "stop_name"])
 pretty_table('sbb_stops', query, conn)
 
+# %%
 query = basic_info("sbb_stop_times", ["stop_id"])
 pretty_table('sbb_stop_times', query, conn)
 
+# %% [markdown]
 # We can see sbb_istdaten has almost 3 billion rows, big data indeed. The bpuic has significantly less null or empty values than the stop names (97 vs ~200 million), so perhaps we should merge our tables on this value, we can see that the buic seems to start with 85 and range from 6 to 9 digits, but there could be typos somewhere. We can also comfirm from the min and max not being NULL that as mentionned in the column description, the stop_name attribute is not always purely alphabetical, some of the stop_names contain the buic (ones before 2021). There are ~25 thousand distinct buics, and ~30 thousand distict stop names, pointing to some inconsistent naming of stop names. 
 #
 # sbb_stops is smaller with  roughly 12 million rows, while sbb_stop_times is the biggest table with over 3 billion rows! In the sbb_stops and sbb_stop_times data, we notice zero null or empty stop_ids, although perhaps some unconventional number has been chosen to represent the NULL stop and therefore bypasses initial detection. We also notice that both datatables have the same min and max stop_id which is encouraging for joining them together, however it is not the same as sbb_istdaten. sbb_stops has over double the amount of unique stop_ids (\~93,000) compared to unique stop_names (\~42,000), which suggests that perhaps two ID conventions have been used. sbb_stop_times has less unique stop_ids with (\~57,000).
 
-# +
+# %%
 import matplotlib.pyplot as plt
 def null_by_year(table,date_col, other_cols, sample = False, sample_rate = 1):
     query = f"SELECT YEAR({date_col}) AS year, COUNT(*) AS total_rows"
@@ -1241,18 +1481,20 @@ def plot_null_percentages_by_year(
     plt.show()
 
 
-# -
-
+# %%
 query = null_by_year("sbb_istdaten","operating_day", ["bpuic","stop_name"])
 df_ist = to_pd_table("sbb_istdaten", query, conn)
 df_ist
 
+# %%
 plot_null_percentages_by_year(df_ist,"sbb_istdaten")
 
+# %% [markdown]
 # We can see in the graph above that no year seems to have a particularly high percentage of nulls, with 2021 being the year with the lowest percentage of nulls. As seen previously, there are a lot more null stop_names than stop_ids.
 #
 # Let us now begin the joining process by joining sbb_istdaten and sbb_stops by stop name to see how well they match up, we can then compare the id naming conventions and test to see if we get a better match that way.
 
+# %%
 # First count the number of matching distinct stop names
 # Note that we only sample the ist table, as it is orders of magnitude bigger
 query = f"""
@@ -1277,9 +1519,10 @@ JOIN distinct_stops_stop_names s ON i.stop_name = s.stop_name
 pretty_table("sampled_stop_name_match_count", query, conn)
 
 
+# %% [markdown]
 # We see that overall the names seem to match somewhat well on the ist part at least, although stops has significantly more unique stop names, let's look at some individual matches to inspect stop_id:  
 
-# +
+# %%
 # Visually inspect some sample matches
 
 query = f"""
@@ -1301,8 +1544,8 @@ LIMIT 40
 """
 pretty_table("stop_name_match_visual_inspection", query, conn, limit=40)
 
-# -
 
+# %% [markdown]
 # Visually inspecting the matches, we can see three main types of formatting conventions for stop_ids in the sbb_stops:
 # - {buic}
 # - Parent{buic}
@@ -1310,6 +1553,7 @@ pretty_table("stop_name_match_visual_inspection", query, conn, limit=40)
 #   
 # Let us count how many rows of sbb_stops follow each format
 
+# %%
 query = fr"""
 WITH distinct_stop_ids AS (
     SELECT DISTINCT stop_id
@@ -1331,9 +1575,11 @@ ORDER BY count DESC
 pretty_table("refined stop_id formats for sbb_stops", query, conn)
 
 
+# %% [markdown]
 # It looks like the majority of IDs do follow this format!
 # Lets do a sanity check with the other two tables
 
+# %%
 query = fr"""
 WITH distinct_stop_ids AS (
     SELECT DISTINCT stop_id
@@ -1354,6 +1600,7 @@ ORDER BY count DESC
 """
 pretty_table("refined stop_id formats for sbb_stop_times", query, conn)
 
+# %%
 query = fr"""
 WITH distinct_stop_ids AS (
     SELECT DISTINCT bpuic
@@ -1375,8 +1622,10 @@ ORDER BY count DESC
 pretty_table("refined stop_id formats for sbb_istdaten", query, conn)
 
 
+# %% [markdown]
 # We see that istdaten and stop_times almost exactly fall in the given categories! Let's check how many matches we now get on stop_id for all three tables:
 
+# %%
 query = f"""
 WITH
 -- Distinct bpuic from istdaten (sampled for performance)
@@ -1416,10 +1665,12 @@ SELECT
 pretty_table("bpuic_match_summary_across_tables", query, conn)
 
 
+# %% [markdown]
 # We see that we get an almost perfect match, with only around 700 missing matched from istdaten!
 #
 # We could now perform the full join with the following code:
 
+# %%
 if False:
     output_table_name = f"{sharedNS}.joined_istdaten_stops_times_clean"
     
@@ -1515,17 +1766,20 @@ if False:
     print(f"Table created successfully: {output_table_name}")
 
 
+# %%
 if False:
     # Check structure of joined table
     query = f"SELECT * FROM {output_table_name}"
     pretty_table(output_table_name, query, conn,5)
 
+# %%
 if False:
     # Check row count of joined table
     query = f"SELECT COUNT(*) AS row_count FROM {output_table_name}"
     pretty_table("Row count of joined table", query, conn)
 
 
+# %% [markdown]
 # ### c) Type of transport - 5/10
 #
 # Explore the distribution of _product_id_ in _{sharedNS}.sbb_istdaten_ for the whole of 2024 and visualize it in a bar graph.
@@ -1558,6 +1812,7 @@ if False:
 #
 # <img src="./figs/1a-example.png" alt="1a-example.png" width="400"/>
 
+# %%
 # %%time
 query = f"""
 SELECT 
@@ -1572,6 +1827,7 @@ ORDER BY 1, 2, 3
 """
 df_ttype = to_pd_table("Monthly stop events by transport type", query, conn)
 
+# %%
 df_ttype["month_year"] = pd.to_datetime({
     "year": df_ttype["year"],
     "month": df_ttype["month"],
@@ -1579,7 +1835,7 @@ df_ttype["month_year"] = pd.to_datetime({
 }).dt.strftime("%Y-%m")
 df_ttype
 
-# +
+# %%
 ### TODO - display the results to match the graph above
 import plotly.express as px
 
@@ -1596,33 +1852,35 @@ fig.update_yaxes(matches=None, showticklabels=True)
 fig.update_layout(showlegend=False)
 fig.show()
 
-# -
 
+# %% [markdown]
 # We notice that transport type had inconsistent capitalisation so everything has been put to lowercase. We also notice language inconsistencies with some transport modes being marked in German, which could potentially correspond to the same transports as some of the english names. We also notice different scales, with some transports going into the tens of Millions such as bus, while taxi has numbers ranging from less than 10 to 100. We also notice an odd transport type, wm-bus, which should probably be included along with bus. We also notice a seasonality pattern in the schiff (boat?) and zahnradbahn modes of transports, we also see a slight summer drop in metro use.
 
+# %% [markdown]
 # ---
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # ## Part II. 50 Points
-# -
 
+# %% [markdown]
 # In this second Part, we will leverage the historical SBB data to model the public transport infrastructure within the Lausanne region.
 #
 # Our objective is to establish a comprehensive data representation of the public transport network, laying the groundwork for our final project. While we encourage the adoption of a data structure tailored to the specific requirements of your final project implementation, the steps outlined here provide a valuable foundation.
 #
 # In this part you will make good use of DQL statements of nested SELECT, GROUP BY, JOIN, IN, DISTINCT, and Geo Spatial UDF.
 
+# %% [markdown]
 # You must create a managed database within your designated namespace, where you'll define the tables necessary for modeling your infrastructure. By 'managed,' we mean that you should not specify a default external location for the namespace.
 #
 # While it's a bit of an overkill, the safest approach is to drop and recreate the namespace the first time you run this notebook.
 
-# + jupyter={"outputs_hidden": true}
+# %% jupyter={"outputs_hidden": true}
 list(sql_fetch([
     f"""DROP SCHEMA IF EXISTS {namespace} CASCADE""", # CASCADE will drop all the tables
     f"""CREATE SCHEMA IF NOT EXISTS {namespace}""",
 ], conn))
 
-# +
+# %%
 # solving schema issues by manually creating user schema
 
 # def sql_fetch(queries, conn):
@@ -1636,18 +1894,19 @@ list(sql_fetch([
 # ], conn))
 
 
-# +
+# %%
 # just checking that it worked
 # I reran the original sql_fetch code after creating shayakhm schema
 # schemas = pd.read_sql(f"SHOW SCHEMAS IN iceberg", conn)
 # filtered_schemas = [schema for schema in schemas['Schema'] if schema.startswith('s')]
 # print(filtered_schemas)
-# -
 
+# %% [markdown]
 # ### a) Find the stops in Lausanne region - 5/50
 #
 #
 
+# %% [markdown]
 # * Explore _{sharedNS}.geo_ and find the records containing the _wkb_geometry_ shapes of the _Lausanne_ and _Ouest lausannois_ districts.
 #      * The shape is from swiss topo
 # * Find all the stops in the _Lausanne_ district from _{sharedNS}.sbb_stops_, as of the first week of July 2024 (use [geo spatial](https://trino.io/docs/471/functions/geospatial.html) functions)
@@ -1659,10 +1918,11 @@ list(sql_fetch([
 #     * _stop_lat_
 #     * _stop_lon_
 
+# %% [markdown]
 # ---
 # #### Solutions
 
-# +
+# %%
 output_table_name = f"{namespace}.sbb_stops_lausanne_region"
 
 # Drop the table if it already exists
@@ -1710,8 +1970,8 @@ with closing(conn.cursor()) as cur:
     cur.execute(query)
     print(f"Table created: {output_table_name}")
 
-# -
 
+# %%
 ### TODO verify the results
 query = f"""
 SELECT * FROM {namespace}.sbb_stops_lausanne_region
@@ -1719,6 +1979,7 @@ LIMIT 5
 """
 pretty_table("sbb_stops_lausanne_region", query, conn)
 
+# %%
 query = f"""
 SELECT COUNT(*) AS total_stops
 FROM {namespace}.sbb_stops_lausanne_region
@@ -1726,19 +1987,24 @@ FROM {namespace}.sbb_stops_lausanne_region
 pretty_table("Number of stops in Lausanne region", query, conn)
 
 
+# %% [markdown]
 # We validate that the subset table has roughly the right number of rows, and has the correct structure. We add a bpuic column containing only the bpuic identifier as in sbb.ist_daten
 
+# %% [markdown]
 # ### b) Find stops with real time data in Lausanne region - 5/50
 
+# %% [markdown]
 # * Use the results of table _{username}.sbb_stops_lausanne_region_ to find all the stops for which real time data is reported in the _{sharedNS}.sbb_istdaten_ table for the full month of **July 2024**.
 # * Report the results in a pandas DataFrame that you will call _stops_df_.
 # * Validation: you should find between 3% and 4% of stops in the area of interest that do not have real time data.
 # * Hint: it is recommended to first generate a list of _distinct_ stop identifiers extracted from istdaten data. This can be achieved through either a nested query or by creating an intermediate table (use your findings of Part I.b).
 
+# %% [markdown]
 # ---
 # #### Solution
 #
 
+# %%
 ### TODO - Create the data frame stops_df
 query = f"""
 WITH ist_july AS (
@@ -1765,10 +2031,11 @@ LEFT JOIN ist_july i
   ON l.bpuic = i.bpuic
 """
 
+# %%
 # %%time
 stops_df= to_pd_table("Stops with/without real-time data (July 2024)", query, conn, limit = 1000)
 
-# +
+# %%
 ### TODO - Verify the results
 total_stops = len(stops_df)
 no_rt_stops = len(stops_df[stops_df["has_realtime"] == False])
@@ -1780,7 +2047,7 @@ print(f"Stops without real-time data: {no_rt_stops} ({pct_missing:.2f}%)")
 # Optional preview
 stops_df.head()
 
-# +
+# %%
 # Filter to stops without real-time data
 no_rt_stops_df = stops_df[stops_df["has_realtime"] == False]
 
@@ -1788,15 +2055,16 @@ no_rt_stops_df = stops_df[stops_df["has_realtime"] == False]
 print("Preview: Stops without real-time data (July 2024)")
 display(no_rt_stops_df.head())
 
-# -
 
+# %% [markdown]
 # Findings: there are five stops that have no real time data, they are listed above.
 
+# %% [markdown]
 # ### c) Display stops in the Lausanne Region - 3/50
 #
 # * Use plotly or similar plot framework to display all the stop locations in Lausanne region on a map (scatter plot or heatmap), using a different color to highlight the stops for which istdaten data is available.
 
-# +
+# %%
 
 ### TODO - Display results of stops_df
 
@@ -1804,12 +2072,14 @@ fig = px.scatter_map(data_frame=stops_df, lat="stop_lat", lon="stop_lon", color=
 
 fig.show()
 
-# -
 
+# %% [markdown]
 # Note that some stops lacking real-time data may actually serve as representations for groups of stops, like `Parent8592050` for Lausanne Gare, which denotes a cluster of stops within Lausanne train station. We ignore these.
 
+# %% [markdown]
 # ### d) Find stops that are within walking distances of each other - 10/50
 
+# %% [markdown]
 # * Use the results of table _{username}.sbb_stops_lausanne_region_ to find all the (directed) pair of stops that are within _500m_ of each other.
 # * Save the results in table _{username}.sbb_stops_to_stops_lausanne_region_
 # * Validation: you should find around $3500\pm 250$ directed stop paris (each way, i.e. _A_ to _B_ and _B_ to _A_).
@@ -1819,7 +2089,7 @@ fig.show()
 #     * _stop_id_b_: an _{sharedNS}.sbb_stops.stop_id_
 #     * _distance_: straight line distance in meters from _stop_id_a_ to _stop_id_b_
 
-# +
+# %%
 # %%time
 ### TODO - create the stop to stop table
 
@@ -1866,9 +2136,9 @@ with closing(conn.cursor()) as cur:
     
     cur.execute(insert_query)
     print(f"Data inserted into {output_table_name}")
-# -
 
 
+# %% [markdown]
 # We couldn't create a new UDF in {namespace} as the permission was denied. The spherical distance between the point is calculated from the Harvesine formula:
 #
 # \begin{align}
@@ -1886,12 +2156,12 @@ with closing(conn.cursor()) as cur:
 #
 # sing R as the Earth radius, 6371000 m.
 
-# +
+# %%
 ### TODO - Verify the results
 
 pd.read_sql(f"""SELECT COUNT(*) FROM {namespace}.sbb_stop_to_stop_lausanne_region""", conn)
-# -
 
+# %% [markdown]
 # ### e) Finds the _stop times_ in Lausanne region - 10/50
 #
 # * Find the stop times and weekdays of trips (trip_id) servicing stops found previously in the Lausanne region.
@@ -1918,7 +2188,7 @@ pd.read_sql(f"""SELECT COUNT(*) FROM {namespace}.sbb_stop_to_stop_lausanne_regio
 # * Pay special attention to the value ranges of the _departure_time_ and _arrival_time_ fields in the _{sharedNS}.sbb_stop_times_ table.
 # * This new table will be used in the next exercise for a routing algorithm. We recommend reviewing the upcoming questions to determine the appropriate data types and potential transformations for the _departure_time_ and _arrival_time_ fields.
 
-# +
+# %%
 ### TODO - Create the table stop times as described above
 # # %%time
 ### TODO - Create the table stop times as described above
@@ -1993,19 +2263,20 @@ with closing(conn.cursor()) as cur:
     
     cur.execute(insert_query)
     print(f"Data inserted into {output_table_name}")  
-# -
 
+# %% [markdown]
 # Some departure and arrival times were larger than 24h as they arrive on the next day so we removed 24 to the hour number so they can be cast as TIME variables.
 #
 # sbb_trips and sbb_calendar had two entries on the first week of July so we selected one of them to avoid duplicates.
 
+# %%
 query = f"""
 SELECT * FROM {sharedNS}.sbb_stop_times
 LIMIT 10
 """
 pretty_table("sbb_stop_times", query, conn, 10)
 
-# +
+# %%
 ### TODO - Verify the results
 
 query = f"""
@@ -2019,7 +2290,7 @@ FROM (
 pd.read_sql_query(query, conn)
 
 
-# +
+# %%
 query = f"""
 SELECT COUNT(*) AS monday_pairs
 FROM (
@@ -2030,14 +2301,15 @@ FROM (
 """
 
 pd.read_sql_query(query, conn)
-# -
 
+# %% [markdown]
 # ### f) Design considerations - 2/50
 #
 # We aim to use our previous findings to recommend an optimal public transport route between two specified locations at a given time on any day of a particular week in any region.
 #
 # Running queries on all data for the entire data set would be inefficient. Could you suggest an optimized table structure to improve the efficiency of queries on the {username}.sbb_stop_times_lausanne_region table?
 
+# %% [markdown]
 # ---
 # #### Solutions
 #
@@ -2074,14 +2346,15 @@ pd.read_sql_query(query, conn)
 # This approach helps save computational resources by avoiding the need to recalculate common search queries each time.
 #
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # ### h) Isochrone Map - 15/50
-# -
 
+# %% [markdown]
 # Note: This question is open-ended, and credits will be allocated based on the quality of both the proposed algorithm and its implementation. You will receive credits for proposing a robust algorithm, even if you do not carry out the implementation.
 #
 # Moreover, it is not mandatory to utilize the large scale database for addressing this question; plain Python is sufficient. You are free to employ any Python package you deem necessary. However, ensure that you list it as a prerequisite of this notebook so that we remember to install them.
 
+# %% [markdown]
 # **Question**:
 # * Given a time of day on Monday (or any other day of the week you may choose), and a starting point in Lausanne area.
 # * Propose a routing algorithm (such as Bellman-Ford, Dijkstra, A-star, etc.) that leverages the previously created tables to estimate the shortest time required to reach each stop within the Lausanne region using public transport.
@@ -2095,15 +2368,17 @@ pd.read_sql_query(query, conn)
 #     - Connections between consecutive stops and trips can only occur at predetermined times. Each trip-id, stop-id pair must be unique and occur at a specific time on any given day according to the timetable. If you want to catch an earlier connection, you must have taken an earlier trip; you cannot go back in time once you've arrived at a stop.
 #     - Consider both a _label setting_ and a _label correcting_ method when making your design decision.
 
+# %% [markdown]
 # ---
 # #### Solution
 
+# %% [markdown]
 # **TODO**: Explain your algorithm, design decisions etc. here
 
-# +
+# %%
 # Peeking at the tables that we will be using 
 
-# + jupyter={"outputs_hidden": true, "source_hidden": true}
+# %% jupyter={"outputs_hidden": true, "source_hidden": true}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_to_stop_lausanne_region
@@ -2111,7 +2386,7 @@ LIMIT 5
 """
 pretty_table("sbb_stop_to_stop_lausanne_region", query, conn, 5)
 
-# + jupyter={"source_hidden": true, "outputs_hidden": true}
+# %% jupyter={"outputs_hidden": true, "source_hidden": true}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_times_lausanne_region
@@ -2119,7 +2394,7 @@ LIMIT 5
 """
 pretty_table("sbb_stop_times_lausanne_region", query, conn, 5)
 
-# + jupyter={"outputs_hidden": true, "source_hidden": true}
+# %% jupyter={"outputs_hidden": true, "source_hidden": true}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_to_stop_lausanne_region
@@ -2127,13 +2402,13 @@ LIMIT 5
 """
 pretty_table("sbb_stop_to_stop_lausanne_region", query, conn, 5)
 
-# + jupyter={"outputs_hidden": true}
+# %% jupyter={"outputs_hidden": true}
 # Install these necessary libraries please 
 # !pip install networkx
 # !pip install datetime
 # !pip install geopy
-# -
 
+# %%
 # Importing the necessary libraries that were not imported above
 import heapq
 import numpy as np
@@ -2145,12 +2420,12 @@ from IPython.display import display
 from geopy.distance import geodesic
 from datetime import datetime, timedelta
 
-# +
+# %%
 ### TODO - Data Preparation
 # Using the sbb_stop_times_lausanne table, we are going to create a NetworkGx Graph.
 
 
-# +
+# %%
 # Prepping the data to build a graph 
 
 # Note: takes about a minute to run 
@@ -2179,7 +2454,7 @@ stop_names = dict(zip(lausanne_stops['stop_id'], lausanne_stops['stop_name']))
 
 
 
-# +
+# %%
 # Building the transport graph 
 # Note: it takes about 2-3 minutes to run
 
@@ -2217,7 +2492,7 @@ for trip_id, trip_group in lausanne_stop_times.groupby("trip_id"):
 
 
 
-# +
+# %%
 # Adding the walking consideration
 # Note: takes about a minute to run
 
@@ -2266,7 +2541,7 @@ for _, row in walking_data.iterrows():
 
 
 
-# +
+# %%
 ### TODO - Routing Algorithm
 
 # We decided to use a Dijkstra base + label-setting algorithm
@@ -2275,7 +2550,7 @@ for _, row in walking_data.iterrows():
 # and it explores nodes based on the current known shortest total travel time
 
 
-# +
+# %%
 
 # we input the chosen criteria in the run 
 def routing_algorithm(start_stop_id, start_time_input, max_duration_minutes):
@@ -2381,10 +2656,10 @@ def routing_algorithm(start_stop_id, start_time_input, max_duration_minutes):
 
 
 
-# +
+# %%
 ###TODO - Interactive Interface to Verify the Algorithm
 
-# +
+# %%
 # making the input widgets
 stop_dict = dict(sorted(zip(lausanne_stops['stop_name'], lausanne_stops['stop_id'])))
 start_stop_widget = widgets.Dropdown(options=stop_dict, description='Start Stop:')
@@ -2512,10 +2787,10 @@ display(widgets.VBox([
     start_stop_widget, hour_widget, minute_widget, duration_widget, run_button, output
 ]))
 
-# +
+# %%
 ### TODO - Others as you see fit.
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # General Considerations and Questions About the Algorithm
 #
 # While working on 2h, I had a few considerations and thoughts about the realism of the current implementation and question:
@@ -2527,8 +2802,8 @@ display(widgets.VBox([
 # In the example below, during trip 727.TA.92-21-I-j24-1.12.H on a Monday, lines 2 and 3 have identical departure and arrival times, even though they correspond to two different stops. A similar issue occurs on lines 11 and 12. 
 #
 # This is unrealistic, as traveling between any two stops should take at least one minute. As a result, our algorithm sometimes shows transit segments with 0-minute durations. 
-# -
 
+# %%
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_times_lausanne_region
@@ -2539,6 +2814,7 @@ ORDER BY departure_time
 pretty_table("sbb_stop_times_lausanne_region", query, conn, 13)
 
 
+# %% [markdown]
 # ## 2. Hold-up Times 
 #
 # In many entries, the arrival time at a stop is exactly the same as the departure time. However, in real-world scenarios, a bus or train usually waits at a stop for at least a few seconds or even minutes to allow passengers to board and unboard. Moreover, this "hold-up" time can vary significantly depending on the station's size and passenger flow. 
@@ -2560,6 +2836,7 @@ pretty_table("sbb_stop_times_lausanne_region", query, conn, 13)
 # Weird. Let us check the data to see if there are truly no bus/trains departing Bussigny at that time. Note: 8501117:0:1 == Bus
 #
 
+# %%
 time_filter = pd.to_timedelta("23:00:00")
 bussigny_departures = lausanne_stop_times[
     (lausanne_stop_times['stop_id'] == stop_dict['Bussigny']) &
@@ -2568,24 +2845,31 @@ bussigny_departures = lausanne_stop_times[
 bussigny_departures_sorted = bussigny_departures.sort_values(by='departure_td')
 bussigny_departures_sorted
 
+# %% [markdown]
 # We see in the table above we have 4 trips departing Bussigny! So why aren't they showing up in our visualized map ??
 #
 # Let's take a closer look at each trip:
 
+# %%
 example_a= '932.TA.91-4-L-j24-1.313.R'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_a]
 
+# %%
 example_b = '914.TA.91-3-T-j24-1.687.R'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_b]
 
+# %% [markdown]
 # The trips above start AND end at Bussigny, explaining why they did not created edges in the graph to new stops. 
 
+# %%
 example_c = '297.TA.91-3-T-j24-1.874.H'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_c]
 
+# %%
 example_d = '277.TA.91-4-L-j24-1.293.H'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_d]
 
+# %% [markdown]
 # Even though it looks like something departs from Bussigny, it's actually the last stop of the trip. That’s why our visualization shows no reachable stops from Bussigny.
 #
 # After thorough examination, I understand why some stops like Bussigny show no connections to other stops, even if it still feels a bit counterintuitive.
@@ -2596,4 +2880,4 @@ lausanne_stop_times[lausanne_stop_times['trip_id'] == example_d]
 # Overall, the algorithm seems to function well, but there are a few issues to consider, as it doesn't always display the truly optimal paths to reach certain destinations.
 #
 
-
+# %%
