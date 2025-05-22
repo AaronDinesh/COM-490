@@ -674,7 +674,6 @@ fig.show()
 #
 # While it's a bit of an overkill, the safest approach is to drop and recreate the namespace the first time you run this notebook.
 
-# + jupyter={"outputs_hidden": true}
 list(sql_fetch([
     f"""DROP SCHEMA IF EXISTS {namespace} CASCADE""", # CASCADE will drop all the tables
     f"""CREATE SCHEMA IF NOT EXISTS {namespace}""",
@@ -1159,7 +1158,7 @@ pd.read_sql_query(query, conn)
 # +
 # Peeking at the tables that we will be using 
 
-# + jupyter={"outputs_hidden": true, "source_hidden": true}
+# + jupyter={"source_hidden": true}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_to_stop_lausanne_region
@@ -1167,7 +1166,7 @@ LIMIT 5
 """
 pretty_table("sbb_stop_to_stop_lausanne_region", query, conn, 5)
 
-# + jupyter={"source_hidden": true, "outputs_hidden": true}
+# + jupyter={"source_hidden": true}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_times_lausanne_region
@@ -1175,20 +1174,19 @@ LIMIT 5
 """
 pretty_table("sbb_stop_times_lausanne_region", query, conn, 5)
 
-# + jupyter={"outputs_hidden": true, "source_hidden": true}
+# + jupyter={"source_hidden": true}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_to_stop_lausanne_region
 LIMIT 5
 """
 pretty_table("sbb_stop_to_stop_lausanne_region", query, conn, 5)
+# -
 
-# + jupyter={"outputs_hidden": true}
 # Install these necessary libraries please 
 # !pip install networkx
 # !pip install datetime
 # !pip install geopy
-# -
 
 # Importing the necessary libraries that were not imported above
 import heapq
@@ -1650,5 +1648,15 @@ lausanne_stop_times[lausanne_stop_times['trip_id'] == example_d]
 # <br> <br>
 # Overall, the algorithm seems to function well, but there are a few issues to consider, as it doesn't always display the truly optimal paths to reach certain destinations.
 #
+
+
+
+
+
+
+
+
+
+
 
 
