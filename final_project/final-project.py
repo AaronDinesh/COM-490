@@ -88,7 +88,7 @@ spark = SparkSession\
             .config('spark.eventLog.gcMetrics.youngGenerationGarbageCollectors', 'G1 Young Generation')\
             .config("spark.executor.memory", "10g")\
             .config("spark.executor.cores", "2")\
-            .config("spark.executor.instances", "4")\
+            .config("spark.executor.instances", "2")\
             .master('yarn')\
             .getOrCreate()
 
@@ -873,7 +873,26 @@ baseline_qs.printSchema()
 # ## Hybrid Delay Model
 
 # %%
+from hashlib import sha256
+
 TRAINING = True
+
+cleaned_region_names = sorted(["".join(x.lower().split()) for x in region_names])
+joined_region_names = "".join(cleaned_region_names)
+region_hash = sha256(joined_region_names.encode('utf-8')).hexdigest()
+model_hdfs_path = f"{hadoopFS}/user/com-490/group/{GroupName}/{region_hash}/best_model"
+
+print(f"Attempting to load the RandomForest PipelineModel from: {model_path_rf_to_load}")
+
+try:
+    # Load the PipelineModel
+    resid_model = PipelineModel.load(model_path_rf_to_load)
+    print(f"PipelineModel loaded successfully from {model_path_rf_to_load}")
+    TRAINING = False
+except Exception as e:
+    print(f"Could not find a PipelineModel to load for the regions {region_names} at {model_path_rf_to_load}")
+    print("Retraining the model...")
+
 
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import RandomForestRegressor
@@ -894,38 +913,37 @@ train, valid, test = data.randomSplit([0.7,0.15,0.15], seed=42)
 
 # %%
 # sample test, take a small 5% sample of train to verify pipeline
-train_small = train.sample(fraction=0.05, seed=42)
+# train_small = train.sample(fraction=0.05, seed=42)
 
-feature_cols = [
-    "scheduled_tt","sched_dep_hour","act_dep_hour",
-    "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
-    "stop_lat","stop_lon","transfer_degree","min_transfer_time",
-    "temperature","precipitation","wind_speed",
-    "q50"]  # include baseline median
+# feature_cols = [
+#     "scheduled_tt","sched_dep_hour","act_dep_hour",
+#     "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
+#     "stop_lat","stop_lon","transfer_degree","min_transfer_time",
+#     "temperature","precipitation","wind_speed",
+#     "q50"]  # include baseline median
 
-assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+# assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
 
-rf_small = RandomForestRegressor(
-    labelCol="resid_label", featuresCol="features",
-    numTrees=10, maxDepth=5, seed=42)
+# rf_small = RandomForestRegressor(
+#     labelCol="resid_label", featuresCol="features",
+#     numTrees=10, maxDepth=5, seed=42)
 
-pipeline_small = Pipeline(stages=[assembler, rf_small])
+# pipeline_small = Pipeline(stages=[assembler, rf_small])
 
-if TRAINING:
-    # fit and predict on the small sample
-    model_small = pipeline_small.fit(train_small)
-    preds_small = model_small.transform(valid).withColumn("pred_delay", col("q50")+col("prediction"))
-else:
-    print("Skipping Training the model")
+# if TRAINING:
+#     # fit and predict on the small sample
+#     model_small = pipeline_small.fit(train_small)
+#     preds_small = model_small.transform(valid).withColumn("pred_delay", col("q50")+col("prediction"))
+# else:
+#     print("Skipping Training the model")
 
 # %%
-if TRAINING:
-    preds_small.select("delay","pred_delay").show(5)
+# if TRAINING:
+#     preds_small.select("delay","pred_delay").show(5)
 
 # %%
 if TRAINING:
     # train on full dataset
-
     rf = RandomForestRegressor(
         labelCol="resid_label", featuresCol="features",
         numTrees=100, maxDepth=10, seed=42)
@@ -1127,7 +1145,25 @@ else:
   print("Skipping testing of best model since TRAINING is false")
 
 # %%
+from hashlib import sha256
+
 # Saving the best model
+if TRAINING:
+    cleaned_region_names = sorted(["".join(x.lower().split()) for x in region_names])
+    joined_region_names = "".join(cleaned_region_names)
+    region_hash = sha256(joined_region_names.encode('utf-8')).hexdigest()
+
+    model_hdfs_path = f"{hadoopFS}/user/com-490/group/{GroupName}/{region_hash}/best_model"
+    print(f"Attempting to save the trained RandomForest PipelineModel to: {model_path_rf}")
+
+    try:
+        # To overwrite if the model path already exists
+        bestPipelineModel_rf.write().overwrite().save(model_path_rf)
+        print(f"PipelineModel saved successfully to {model_path_rf}")
+    except Exception as e:
+        print(f"Error saving model: {e}")
+
+    
 
 
 # %%
