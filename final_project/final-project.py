@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.11.2
+#       jupytext_version: 1.16.6
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -593,72 +593,244 @@ lausanne_stop_times = joined_df.withColumn(
     "arrival_td", to_timestamp("arrival_time", "HH:mm:ss")
 )
 
-# %%
+# %% jupyter={"source_hidden": true}
+# old graph version 
+# import networkx as nx
+# from datetime import timedelta
+
+
+# filtered_stop_times_list = lausanne_stop_times.select(
+#     "trip_id", "stop_id", "departure_time", "arrival_time"
+# ).collect()
+
+# stop_to_stop_list = stop_to_stop_df.select(
+#     "stop_id_a", "stop_id_b", "distance"
+# ).collect()
+
+# stop_times = [
+#     {
+#         "trip_id": row["trip_id"],
+#         "stop_id": row["stop_id"],
+#         "departure_td": timedelta(hours=int(row["departure_time"][:2]),
+#                                   minutes=int(row["departure_time"][3:5]),
+#                                   seconds=int(row["departure_time"][6:8])),
+#         "arrival_td": timedelta(hours=int(row["arrival_time"][:2]),
+#                                 minutes=int(row["arrival_time"][3:5]),
+#                                 seconds=int(row["arrival_time"][6:8]))
+#     }
+#     for row in filtered_stop_times_list
+# ]
+
+# G = nx.DiGraph()
+
+# from collections import defaultdict
+# trip_groups = defaultdict(list)
+
+# for row in stop_times:
+#     trip_groups[row["trip_id"]].append(row)
+
+# for trip_id, group in trip_groups.items():
+#     sorted_group = sorted(group, key=lambda x: x["departure_td"])
+#     previous_stop = None
+
+#     for row in sorted_group:
+#         current_stop = (row['stop_id'], row['departure_td'])
+#         G.add_node(current_stop)
+
+#         if previous_stop:
+#             travel_time = (row['arrival_td'] - previous_stop[1]).total_seconds() / 60.0
+#             G.add_edge(previous_stop, current_stop, weight=travel_time, trip_id=trip_id)
+
+#         previous_stop = (row['stop_id'], row['arrival_td'])
+
+# node_list = list(G.nodes)
+# for row in stop_to_stop_list:
+#     stop_a, stop_b, distance = row['stop_id_a'], row['stop_id_b'], row['distance']
+#     walking_time_min = distance / (WALKING_SPEED_MPS * 60)
+
+#     for node in node_list:
+#         if node[0] == stop_a:
+#             departure_time = node[1]
+#             arrival_time = departure_time + timedelta(minutes=walking_time_min)
+#             G.add_edge(node, (stop_b, arrival_time), weight=walking_time_min, trip_id='WALK')
+
+
+# print(f"Nodes: {len(G.nodes)}")
+# print(f"Edges: {len(G.edges)}")
+
+
+# %% jupyter={"source_hidden": true}
+# this is the new version where travel_time = (arrival at b) - (deparrture from a) 
+# so now the edge weigth is pure travel time 
+# not travel time + wait time at a 
+
+# NOTE: Takes about 3 minutes to run
+
 import networkx as nx
 from datetime import timedelta
+from collections import defaultdict
 
 
-filtered_stop_times_list = lausanne_stop_times.select(
-    "trip_id", "stop_id", "departure_time", "arrival_time"
-).collect()
+WALKING_SPEED_MPS = 50 / 60 
 
-stop_to_stop_list = stop_to_stop_df.select(
-    "stop_id_a", "stop_id_b", "distance"
-).collect()
+# Collecting data from Spark 
+# lots of tries and accepts cause I had a few bugs 
+filtered_stop_times_list = []
+if 'lausanne_stop_times' in locals() and lausanne_stop_times is not None:
+    try:
+        filtered_stop_times_list = lausanne_stop_times.select(
+            "trip_id", "stop_id", "departure_time", "arrival_time"
+        ).collect()
+        print(f"Collected {len(filtered_stop_times_list)} rows for filtered_stop_times_list.")
+    except Exception as e:
+        print(f"Error collecting filtered_stop_times_list: {e}")
+else:
+    print("'lausanne_stop_times' not found or is None")
 
-stop_times = [
-    {
-        "trip_id": row["trip_id"],
-        "stop_id": row["stop_id"],
-        "departure_td": timedelta(hours=int(row["departure_time"][:2]),
-                                  minutes=int(row["departure_time"][3:5]),
-                                  seconds=int(row["departure_time"][6:8])),
-        "arrival_td": timedelta(hours=int(row["arrival_time"][:2]),
-                                minutes=int(row["arrival_time"][3:5]),
-                                seconds=int(row["arrival_time"][6:8]))
-    }
-    for row in filtered_stop_times_list
-]
+stop_to_stop_list = []
+if 'stop_to_stop_df' in locals() and stop_to_stop_df is not None:
+    try:
+        stop_to_stop_list = stop_to_stop_df.select(
+            "stop_id_a", "stop_id_b", "distance" 
+        ).collect()
+        print(f"Collected {len(stop_to_stop_list)} rows for stop_to_stop_list.")
+    except Exception as e:
+        print(f"Error collecting stop_to_stop_list: {e}")
+else:
+    print("'stop_to_stop_df' not found or is None")
 
+
+
+# Data prep for PT
+stop_times_data_for_graph = [] 
+if filtered_stop_times_list:
+    try:
+        stop_times_data_for_graph = [
+            {
+                "trip_id": r["trip_id"],
+                "stop_id": r["stop_id"],
+                "departure_td": timedelta(
+                    hours=int(r["departure_time"][:2]),
+                    minutes=int(r["departure_time"][3:5]),
+                    seconds=int(r["departure_time"][6:8])
+                ),
+                "arrival_td": timedelta(
+                    hours=int(r["arrival_time"][:2]),
+                    minutes=int(r["arrival_time"][3:5]),
+                    seconds=int(r["arrival_time"][6:8])
+                )
+            }
+            for r in filtered_stop_times_list
+        ]
+        print(f"PT Data Prep: Converted {len(stop_times_data_for_graph)} entries to timedelta format.")
+    except Exception as e:
+        print(f"PT Data Prep: Error during timedelta conversion: {e}")
+        stop_times_data_for_graph = [] 
+else:
+    print("PT Data Prep: 'filtered_stop_times_list' is empty. No PT data to process.")
+
+# Grabbing trips 
+trip_groups_graph = defaultdict(list)
+if stop_times_data_for_graph: 
+    for row_data in stop_times_data_for_graph: # Use the correctly processed list
+        trip_groups_graph[row_data["trip_id"]].append(row_data)
+    print(f"PT Data Prep: Grouped PT data into {len(trip_groups_graph)} trip_ids.")
+else:
+    print("PT Data Prep: 'stop_times_data_for_graph' is empty. 'trip_groups_graph' will be empty.")
+
+# Building Graph
 G = nx.DiGraph()
 
-from collections import defaultdict
-trip_groups = defaultdict(list)
+attempted_pt_edges = 0
+non_negative_pt_edge_attempts = 0
+actually_added_new_pt_edges = 0 
+walking_edge_addition_attempts = 0
 
-for row in stop_times:
-    trip_groups[row["trip_id"]].append(row)
+# Public transport edges 
+if trip_groups_graph:
+    print("Building PT edges...")
+    for trip_id, group in trip_groups_graph.items():
+        sorted_group = sorted(group, key=lambda x: x["departure_td"])
+        for i in range(len(sorted_group) - 1):
+            stop_a_data = sorted_group[i]
+            stop_b_data = sorted_group[i+1]
+            from_node = (stop_a_data['stop_id'], stop_a_data['departure_td'])
+            to_node   = (stop_b_data['stop_id'], stop_b_data['arrival_td'])
+            G.add_node(from_node); G.add_node(to_node) # Add nodes explicitly
+            travel_time_delta = stop_b_data['arrival_td'] - stop_a_data['departure_td']
+            travel_time_minutes = travel_time_delta.total_seconds() / 60.0
+            attempted_pt_edges +=1
+            if travel_time_minutes >= 0:
+                non_negative_pt_edge_attempts +=1
+                edge_existed_before = G.has_edge(from_node, to_node)
+                G.add_edge(from_node, to_node, 
+                           weight=travel_time_minutes, 
+                           trip_id=trip_id,
+                           dep_time=from_node[1], # this is stop_a_data['departure_td']
+                           arr_time=to_node[1]    # this is stop_b_data['arrival_td']
+                          ) 
+                if not edge_existed_before: actually_added_new_pt_edges += 1
+    print("Finished building PT edges.")
+else:
+    print("No PT trips to process for graph building.")
+                
+# print(f"\n Double Checking Our Data")
+# print(f"Total PT segments processed (attempted_pt_edges): {attempted_pt_edges}")
+# print(f"PT segments with non-negative travel time (non_negative_pt_edge_attempts): {non_negative_pt_edge_attempts}")
+# print(f"Unique PT edges added to graph (actually_added_new_pt_edges): {actually_added_new_pt_edges}")
+# print(f"Nodes after PT processing: {len(G.nodes())}") 
+# print(f"Edges after PT processing (G.edges()): {len(G.edges())}") 
 
-for trip_id, group in trip_groups.items():
-    sorted_group = sorted(group, key=lambda x: x["departure_td"])
-    previous_stop = None
+# Building walking edges 
+node_list_for_walking = list(G.nodes()) 
 
-    for row in sorted_group:
-        current_stop = (row['stop_id'], row['departure_td'])
-        G.add_node(current_stop)
+if node_list_for_walking and stop_to_stop_list: 
+    print(f"Building walking edges. Nodes available: {len(node_list_for_walking)}, Walk definitions: {len(stop_to_stop_list)}")
+    for walk_info_row in stop_to_stop_list:
+        try:
+            # Handle Spark Row or dict
+            stop_a_id = walk_info_row['stop_id_a'] if isinstance(walk_info_row, dict) else walk_info_row.stop_id_a
+            stop_b_id = walk_info_row['stop_id_b'] if isinstance(walk_info_row, dict) else walk_info_row.stop_id_b
+            distance_meters = float(walk_info_row['distance'] if isinstance(walk_info_row, dict) else walk_info_row.distance) 
+        except (TypeError, KeyError, ValueError, AttributeError) as e:
+            # print(f"Skipping walk_info_row due to data issue: {walk_info_row}, Error: {e}")
+            continue
 
-        if previous_stop:
-            travel_time = (row['arrival_td'] - previous_stop[1]).total_seconds() / 60.0
-            G.add_edge(previous_stop, current_stop, weight=travel_time, trip_id=trip_id)
+        if distance_meters < 0: continue # Distance cannot be negative
+            
+        walking_speed_mpm = WALKING_SPEED_MPS * 60
+        if walking_speed_mpm == 0: continue
+        
+        walking_time_min = distance_meters / walking_speed_mpm # Time in minutes
+        
+        if walking_time_min < 0 : continue # Time cannot be negative
 
-        previous_stop = (row['stop_id'], row['arrival_td'])
+        for source_node_walk_start in node_list_for_walking: 
+            if source_node_walk_start[0] == stop_a_id:
+                walk_departure_time = source_node_walk_start[1]
+                walk_arrival_time_at_b = walk_departure_time + timedelta(minutes=walking_time_min)
+                destination_node_for_walk = (stop_b_id, walk_arrival_time_at_b)
 
-node_list = list(G.nodes)
-for row in stop_to_stop_list:
-    stop_a, stop_b, distance = row['stop_id_a'], row['stop_id_b'], row['distance']
-    walking_time_min = distance / (WALKING_SPEED_MPS * 60)
+                walking_edge_addition_attempts +=1
+                G.add_edge(source_node_walk_start,
+                           destination_node_for_walk,
+                           weight=walking_time_min,
+                           trip_id='WALK',
+                           dep_time=walk_departure_time,   
+                           arr_time=walk_arrival_time_at_b,
+                           distance_m=distance_meters)      
+                                                    
+    print("Finished building walking edges.")
+else:
+    if not node_list_for_walking: print("No nodes from PT to start walking from for walking edge creation.")
+    if not stop_to_stop_list: print("Warning: 'stop_to_stop_list' is empty. No walking definitions to process.")
 
-    for node in node_list:
-        if node[0] == stop_a:
-            departure_time = node[1]
-            arrival_time = departure_time + timedelta(minutes=walking_time_min)
-            G.add_edge(node, (stop_b, arrival_time), weight=walking_time_min, trip_id='WALK')
+print(f"\n Double Checking Our Data")
+print(f"Total walking edge addition attempts: {walking_edge_addition_attempts}") 
+print(f"Total Nodes in Graph: {len(G.nodes())}")
+print(f"Total Edges in Graph: {len(G.edges())}")
 
-
-print(f"Nodes: {len(G.nodes)}")
-print(f"Edges: {len(G.edges)}")
-
-
-# %% [markdown]
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # III. Predictive Model
 
 # %%
@@ -1219,13 +1391,589 @@ print("RandomForest training complete")'''
 # %%
 
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # # IV. Route Planning Algorithm
 # %%
+import networkx as nx
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta, date as DateObject 
+from heapq import heappush, heappop 
+import math
+from collections import defaultdict
+from IPython.display import display, clear_output
+import ipywidgets as widgets
+import plotly.express as px
+import plotly.graph_objects as go
+
+class RobustJourneyPlanner:
+    def __init__(self, graph, delay_model=None, max_walking_distance=500, walking_speed=50/60):
+        self.graph = graph
+        self.delay_model = delay_model
+        self.max_walking_distance = max_walking_distance
+        self.walking_speed_mps = walking_speed
+
+    def get_stop_info(self, stop_df): 
+        if stop_df is None: 
+            print("Warning: get_stop_info received None for stop_df.")
+            return {}
+        try:
+            required_cols = ["stop_id", "stop_name", "stop_lat", "stop_lon"]
+            actual_cols = stop_df.columns
+            if not ("stop_id" in actual_cols and "stop_name" in actual_cols):
+                print("Warning: stop_df is missing 'stop_id' or 'stop_name'")
+                return {}
+            if not all(c in actual_cols for c in required_cols):
+                print(f"Warning: stop_df missing some geo/detail columns. Using available: {required_cols}. Found: {actual_cols}")
+                cols_to_select = [c for c in required_cols if c in actual_cols]
+                if not ("stop_id" in cols_to_select and "stop_name" in cols_to_select):
+                     print("Error: Critical 'stop_id' or 'stop_name' still missing after column selection.")
+                     return {}
+                stops_pd = stop_df.select(*cols_to_select).toPandas()
+            else:
+                stops_pd = stop_df.select(*required_cols).toPandas()
+            stops_pd.dropna(subset=['stop_id'], inplace=True)
+            return stops_pd.set_index("stop_id").to_dict('index')
+        except Exception as e: 
+            print(f"Error in get_stop_info: {e}"); 
+            import traceback; traceback.print_exc(); 
+            return {}
+
+    def _calculate_walking_time(self, lat1, lon1, lat2, lon2):
+        R = 6371000 #very detailed walking time LOL 
+        if None in [lat1, lon1, lat2, lon2]: return float('inf'), float('inf')
+        try: lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
+        except ValueError: return float('inf'), float('inf')
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        d_phi = math.radians(lat2 - lat1); d_lambda = math.radians(lon2 - lon1)
+        a = math.sin(d_phi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        dist = R * c
+        time_s = float('inf') if self.walking_speed_mps == 0 else dist / self.walking_speed_mps
+        return dist, time_s
+
+    # DUMMY VALUES CAUSE MODEL NOT IMPLEMENTED YET 
+    def _get_delay_distribution(self, trip_id, dep_stop_id, dep_time_td, day_of_week=None):
+        if self.delay_model is None: return {"q50": 0, "q75": 0, "q90": 0, "q95": 0}
+        return {"q50": 0, "q75": 0, "q90": 0, "q95": 0}
+
+
+    def _has_significant_physical_stop_loop(self, path_nodes_list):
+        if not path_nodes_list or len(path_nodes_list) < 3:
+            return False
+        stop_ids_in_path = [node[0] for node in path_nodes_list]
+        for i in range(len(stop_ids_in_path) - 1):
+            current_stop = stop_ids_in_path[i]
+            for j in range(i + 2, len(stop_ids_in_path)): 
+                if stop_ids_in_path[j] == current_stop:
+                    is_actual_loop = False
+                    for k_loop_check in range(i + 1, j):
+                        if stop_ids_in_path[k_loop_check] != current_stop:
+                            is_actual_loop = True
+                            break
+                    if is_actual_loop:
+                        # print(f"DEBUG Loop Path segment ...{path_nodes_list[i]}...{path_nodes_list[j]}...")
+                        return True
+        return False
+
+    def find_robust_paths(self, source_stop_id, target_stop_id,
+                         departure_time_td=None, 
+                         latest_arrival_constraint_td=None, 
+                         confidence_level=0.75,
+                         max_options=3):
+        if departure_time_td is None and latest_arrival_constraint_td is None:
+            print("Error: At least departure time or arrival constraint must be specified.")
+            return []
+        
+        effective_earliest_departure_td = departure_time_td
+        if departure_time_td is None and latest_arrival_constraint_td is not None:
+            print("Warning: Only arrival constraint specified. Using a wide departure window for forward search (suboptimal).")
+            effective_earliest_departure_td = latest_arrival_constraint_td - timedelta(hours=4) 
+            if effective_earliest_departure_td < timedelta(0): effective_earliest_departure_td = timedelta(0)
+        elif departure_time_td is None: 
+            effective_earliest_departure_td = timedelta(0)
+
+        confidence_map = {0.5: "q50", 0.75: "q75", 0.9: "q90", 0.95: "q95"}
+        quantile_key = confidence_map.get(confidence_level, "q75")
+
+        found_options = self._forward_dijkstra_for_options(
+            source_stop_id, target_stop_id, effective_earliest_departure_td,
+            latest_arrival_constraint_td, quantile_key, max_options
+        )
+        
+        # Filtering again by original departure_time_td if it was specified and we used a wider hack window for "arrive by"
+        if departure_time_td is not None: 
+            found_options = [opt for opt in found_options if opt["departure_time"] >= departure_time_td]
+        
+        # Sorting final selected options for presentation
+        found_options.sort(key=lambda x: (x["arrival_time"], x["departure_time"], x["transfers"]))
+        return found_options[:max_options] # Making sure we adhere to max_options
+
+    def _forward_dijkstra_for_options(self, source_stop_id, target_stop_id,
+                                     earliest_departure_td, latest_arrival_constraint_td,
+                                     quantile_key, num_options_desired):
+        start_event_nodes = []
+        for node in self.graph.nodes(): 
+            if node[0] == source_stop_id and isinstance(node[1], timedelta) and \
+               node[1] >= earliest_departure_td:
+                try: 
+                    _ = next(self.graph.successors(node)) 
+                    if node not in start_event_nodes:
+                        start_event_nodes.append(node)
+                except StopIteration: pass 
+        
+        if not start_event_nodes: return []
+        start_event_nodes.sort(key=lambda x: x[1])
+
+        queue = []
+        for start_node in start_event_nodes:
+            heappush(queue, (start_node[1].total_seconds(), 0.0, start_node, [start_node]))
+
+        visited_earliest_arrival = {}
+        completed_options_raw = [] 
+        
+        max_iterations = 750000; iterations = 0 
+
+        # Heuristic: How many times we've hit the target. Stop if we have plenty of raw options.
+        target_hit_count = 0
+
+        while queue and target_hit_count < num_options_desired * 5 and iterations < max_iterations: 
+            iterations += 1 
+            current_arrival_sec, current_total_walk_dist_m, current_event_node, current_path_nodes = heappop(queue)
+            current_arrival_td = timedelta(seconds=current_arrival_sec)
+            current_stop_id, _ = current_event_node 
+
+            # Pruning based on visited states
+            if current_event_node in visited_earliest_arrival and \
+               current_arrival_td >= visited_earliest_arrival[current_event_node]:
+                continue
+            visited_earliest_arrival[current_event_node] = current_arrival_td
+
+            # If current node is the target
+            if current_stop_id == target_stop_id:
+                if latest_arrival_constraint_td and current_arrival_td > latest_arrival_constraint_td:
+                    continue
+                actual_departure_node = current_path_nodes[0]; actual_departure_time_td = actual_departure_node[1]
+                total_travel_time_minutes = (current_arrival_td - actual_departure_time_td).total_seconds() / 60.0
+                if total_travel_time_minutes < -1e-7: continue 
+
+                # Checking for loops before adding to raw options
+                if self._has_significant_physical_stop_loop(current_path_nodes):
+                    # print(f"DEBUG: Pruning loopy path to target: {[n[0] for n in current_path_nodes]}")
+                    continue
+
+                option_details = {"departure_stop": source_stop_id, "departure_time": actual_departure_time_td,
+                                  "arrival_stop": target_stop_id, "arrival_time": current_arrival_td,
+                                  "travel_time_minutes": total_travel_time_minutes,
+                                  "walking_distance_meters": current_total_walk_dist_m,
+                                  "transfers": self._count_transfers(current_path_nodes),
+                                  "path": current_path_nodes, # List of (stop_id, time_td) tuples
+                                  "confidence_level": self._quantile_key_to_confidence(quantile_key)}
+                completed_options_raw.append(option_details)
+                target_hit_count +=1
+            
+            # Heuristic pruning if current path is already much later than constraint
+            if latest_arrival_constraint_td and current_arrival_td > latest_arrival_constraint_td + timedelta(minutes=60) : 
+                pass 
+
+            for successor_event_node in self.graph.successors(current_event_node):
+                edge_data = self.graph.get_edge_data(current_event_node, successor_event_node)
+                if not edge_data: continue
+                
+                segment_departure_td = current_event_node[1] 
+                segment_scheduled_arrival_td = successor_event_node[1] 
+                trip_id_seg = edge_data.get("trip_id", "")
+                
+                if segment_scheduled_arrival_td < segment_departure_td: continue
+                
+                new_path_nodes_candidate = current_path_nodes + [successor_event_node]
+
+                # More robust simple loop check (A->B->A) for PT before pushing to heap
+                if trip_id_seg != "WALK" and len(new_path_nodes_candidate) >= 3:
+                    if new_path_nodes_candidate[-1][0] == new_path_nodes_candidate[-3][0]: # Successor stop is same as grandparent stop
+                        continue 
+                
+                delay_on_segment_seconds = 0
+                if trip_id_seg != "WALK":
+                    delay_dist = self._get_delay_distribution(trip_id_seg, current_event_node[0], segment_departure_td)
+                    delay_on_segment_seconds = delay_dist.get(quantile_key, 0)
+                
+                actual_arrival_at_successor_td = segment_scheduled_arrival_td + timedelta(seconds=delay_on_segment_seconds)
+
+                if latest_arrival_constraint_td and actual_arrival_at_successor_td > latest_arrival_constraint_td:
+                    continue
+
+                new_total_walk_dist_m = current_total_walk_dist_m
+                if trip_id_seg == "WALK": 
+                    new_total_walk_dist_m += edge_data.get("distance_m", 0) 
+                if new_total_walk_dist_m > self.max_walking_distance: continue
+                
+                # Pruning for already visited successor state
+                if successor_event_node in visited_earliest_arrival and \
+                   actual_arrival_at_successor_td >= visited_earliest_arrival[successor_event_node]:
+                    continue
+                
+                heappush(queue, (actual_arrival_at_successor_td.total_seconds(),
+                                     new_total_walk_dist_m, successor_event_node, new_path_nodes_candidate))
+        
+        if iterations >= max_iterations: 
+            print(f"Warning: Dijkstra search reached max iterations ({max_iterations}).")
+        
+        # Post processing logic for diversity and no repetition
+        if not completed_options_raw: return []
+
+        # 1. Filtering out paths with significant loops from the raw options
+        non_loopy_options = [opt for opt in completed_options_raw if not self._has_significant_physical_stop_loop(opt["path"])]
+        if not non_loopy_options: 
+            print("Warning: All found paths had significant loops based on current check.")
+            # Fallback to raw options if filtering removes everything, then sort and pick
+            non_loopy_options = completed_options_raw 
+            if not non_loopy_options: return [] # Still nothing
+
+        # 2. Sorting by a primary metric like arrival time, then departure, then transfers
+        non_loopy_options.sort(key=lambda x: (x["arrival_time"], x["departure_time"], x["transfers"]))
+        
+        final_selected_options = []
+        # Heuristic for diversity: we wanna pick options with different departure "buckets"
+        # and different "main characteristics" (e.g., number of transfers, or key intermediate trips)
+        
+        selected_path_footprints = set() # for us to store a signature of selected paths
+
+        for option in non_loopy_options:
+            if len(final_selected_options) >= num_options_desired:
+                break
+
+            # Create a simple footprint for the path (e.g., departure time bucket, num_transfers, main trip ids)
+            dep_bucket = int(option["departure_time"].total_seconds() / (15 * 60)) # 15-min departure buckets
+            
+            # Get dominant PT trip_ids (e.g., first 2 non-walk trip_ids)
+            pt_trips_in_path = []
+            for k_path in range(len(option["path"]) - 1):
+                edge_data_fp = self.graph.get_edge_data(option["path"][k_path], option["path"][k_path+1])
+                if edge_data_fp and edge_data_fp.get("trip_id") != "WALK":
+                    pt_trips_in_path.append(edge_data_fp.get("trip_id"))
+                if len(pt_trips_in_path) >= 2: break
+            
+            footprint = (dep_bucket, option["transfers"], tuple(pt_trips_in_path))
+
+            if footprint not in selected_path_footprints:
+                final_selected_options.append(option)
+                selected_path_footprints.add(footprint)
+        
+        # If still not enough options, filling with the best remaining ones (that are not identical paths)
+        if len(final_selected_options) < num_options_desired:
+            existing_raw_paths_in_final = {tuple(opt['path']) for opt in final_selected_options}
+            for option in non_loopy_options: # Iterate again through all non-loopy sorted options
+                if len(final_selected_options) >= num_options_desired:
+                    break
+                if tuple(option['path']) not in existing_raw_paths_in_final:
+                    final_selected_options.append(option)
+                    existing_raw_paths_in_final.add(tuple(option['path'])) # trynna avoid duplicates so we use raw paths
+
+        final_selected_options.sort(key=lambda x: (x["arrival_time"], x["departure_time"], x["transfers"]))
+        return final_selected_options[:num_options_desired]
+
+
+    def _count_transfers(self, path_nodes_list):
+        if not path_nodes_list or len(path_nodes_list) <= 1: return 0
+        transfers = 0; last_pt_trip_id = None
+        for i in range(len(path_nodes_list) - 1):
+            node_u, node_v = path_nodes_list[i], path_nodes_list[i+1]
+            if not (isinstance(node_u, tuple) and len(node_u) == 2 and isinstance(node_v, tuple) and len(node_v) == 2): continue
+            edge_data = self.graph.get_edge_data(node_u, node_v)
+            if not edge_data: continue
+            segment_trip_id = edge_data.get("trip_id")
+            if segment_trip_id != "WALK" and segment_trip_id is not None: # Current segment is PT
+                if last_pt_trip_id is not None and segment_trip_id != last_pt_trip_id:
+                    transfers += 1 
+                last_pt_trip_id = segment_trip_id
+            # If segment_trip_id is "WALK", last_pt_trip_id remains unchanged,
+            # so the next PT segment will compare against the PT trip before the walk.
+        return transfers
+
+    # UI stuff starts
+
+    def _reconstruct_path(self, reverse_path, target_node): 
+        return reverse_path 
+
+    def _quantile_key_to_confidence(self, quantile_key):
+        quantile_map = {"q50": 0.5, "q75": 0.75, "q90": 0.9, "q95": 0.95}
+        return quantile_map.get(quantile_key, 0.75)
+
+    def format_results(self, paths, stop_info):
+        formatted_paths = []
+        if not stop_info: print("Warning: stop_info not provided to format_results."); stop_info = {}
+        for i, path_result_dict in enumerate(paths):
+            path_detail_nodes = path_result_dict.get("path", []) 
+            segments = []
+            if not path_detail_nodes or len(path_detail_nodes) < 1:
+                if len(path_detail_nodes) == 1: 
+                     curr_stop_id, curr_time_td = path_detail_nodes[0]
+                     curr_stop_name = stop_info.get(curr_stop_id, {}).get("stop_name", curr_stop_id)
+                     curr_time_str = self._format_time(curr_time_td)
+                     segments.append({"from_stop": curr_stop_name, "to_stop": curr_stop_name, "departure": curr_time_str, "arrival": curr_time_str, "duration_mins": 0.0, "type": "AT_STOP", "trip_id": "N/A"})
+            else: 
+                for j in range(len(path_detail_nodes) - 1):
+                    curr_node, next_node = path_detail_nodes[j], path_detail_nodes[j+1]
+                    curr_stop_id, curr_time_td = curr_node; next_stop_id, next_time_td = next_node
+                    edge_data = self.graph.get_edge_data(curr_node, next_node) or {}
+                    trip_id_seg = edge_data.get("trip_id", "UNKNOWN")
+                    transport_type = "WALK" if trip_id_seg == "WALK" else "TRANSIT"
+                    curr_stop_name = stop_info.get(curr_stop_id, {}).get("stop_name", curr_stop_id)
+                    next_stop_name = stop_info.get(next_stop_id, {}).get("stop_name", next_stop_id)
+                    curr_time_str = self._format_time(curr_time_td); next_time_str = self._format_time(next_time_td)
+                    segment_duration_mins = (next_time_td - curr_time_td).total_seconds() / 60.0
+                    segments.append({"from_stop": curr_stop_name, "to_stop": next_stop_name, "departure": curr_time_str, "arrival": next_time_str, "duration_mins": round(segment_duration_mins, 1), "type": transport_type, "trip_id": trip_id_seg})
+            route_summary = {"route_id": i + 1, "departure": self._format_time(path_result_dict["departure_time"]), "arrival": self._format_time(path_result_dict["arrival_time"]), "travel_time_mins": round(path_result_dict.get("travel_time_minutes", 0), 1), "transfers": path_result_dict.get("transfers", 0), "walking_distance": round(path_result_dict.get("walking_distance_meters", 0)), "confidence": f"{int(path_result_dict.get('confidence_level', 0.75) * 100)}%", "segments": segments, "_raw_path_nodes": path_detail_nodes}
+            formatted_paths.append(route_summary)
+        return formatted_paths
+
+    def _format_time(self, time_td):
+        if not isinstance(time_td, timedelta): return "00:00:00"
+        total_seconds = time_td.total_seconds(); sign = "-" if total_seconds < 0 else ""; total_seconds = abs(total_seconds)
+        h = int(total_seconds // 3600); m = int((total_seconds % 3600) // 60); s = int(total_seconds % 60)
+        return f"{sign}{h:02d}:{m:02d}:{s:02d}"
+
+    def visualize_path(self, path_dict, stop_info):
+        path_nodes_viz = path_dict.get("_raw_path_nodes");
+        if not path_nodes_viz or not stop_info: print("Warning: Cannot visualize path."); return go.Figure()
+        stop_map_data_viz = []; unique_stops_for_map_markers = {} 
+        for node_viz in path_nodes_viz: 
+            sid_viz = node_viz[0]; info_viz = stop_info.get(sid_viz)
+            if info_viz and 'stop_lat' in info_viz and 'stop_lon' in info_viz:
+                if sid_viz not in unique_stops_for_map_markers: 
+                    stop_map_data_viz.append({"stop_id": sid_viz, "stop_name": info_viz.get("stop_name", sid_viz), "lat": info_viz["stop_lat"], "lon": info_viz["stop_lon"]})
+                    unique_stops_for_map_markers[sid_viz] = True 
+        if not stop_map_data_viz: print("Warning: No valid stops for visualization."); return go.Figure()
+        df_map = pd.DataFrame(stop_map_data_viz);
+        if df_map.empty: print("Warning: Map DataFrame empty."); return go.Figure()
+        path_segments_for_map = []
+        if len(path_nodes_viz) >= 2:
+            for j in range(len(path_nodes_viz) - 1):
+                curr_n_map, next_n_map = path_nodes_viz[j], path_nodes_viz[j+1]
+                curr_sid_map, next_sid_map = curr_n_map[0], next_n_map[0]
+                curr_geo, next_geo = stop_info.get(curr_sid_map), stop_info.get(next_sid_map)
+                if curr_geo and 'stop_lat' in curr_geo and 'stop_lon' in curr_geo and \
+                   next_geo and 'stop_lat' in next_geo and 'stop_lon' in next_geo:
+                    edge_d_map = self.graph.get_edge_data(curr_n_map, next_n_map) or {}
+                    tid_map = edge_d_map.get("trip_id", "UNKNOWN")
+                    color = 'red' if tid_map == 'WALK' else 'blue'; seg_type = 'Walk' if tid_map == 'WALK' else 'Transit'
+                    path_segments_for_map.append({'lat': [float(curr_geo["stop_lat"]), float(next_geo["stop_lat"])], 'lon': [float(curr_geo["stop_lon"]), float(next_geo["stop_lon"])], 'segment_type': seg_type, 'color': color})
+        fig = px.scatter_mapbox(df_map, lat='lat', lon='lon', hover_name='stop_name', text=df_map['stop_name'].fillna('') if 'stop_name' in df_map.columns else None, size=[8]*len(df_map), zoom=11, center={"lat": df_map['lat'].mean(), "lon": df_map['lon'].mean()} if not df_map.empty else {"lat":46.52, "lon":6.63}, mapbox_style="carto-positron") 
+        if 'stop_name' in df_map.columns: fig.update_traces(textposition='top right')
+        for seg in path_segments_for_map:
+            fig.add_trace(go.Scattermapbox(lat=seg['lat'], lon=seg['lon'], mode='lines', line=dict(width=4 if seg['segment_type']=='Transit' else 2, color=seg['color']), name=seg['segment_type'], hoverinfo='skip'))
+        legend_names = set(); fig.for_each_trace(lambda trace: trace.update(showlegend=False) if (trace.name in legend_names) else legend_names.add(trace.name))
+        fig.update_layout(title=f"Route: Dep @ {path_dict['departure']}, Arr @ {path_dict['arrival']}", legend_title_text='Segment Type', height=600, margin={"r":0,"t":50,"l":0,"b":0})
+        return fig
+
+
+def create_journey_planner_ui(planner, stops_df_for_ui): # stops_df_for_ui is Spark DF
+    if stops_df_for_ui is None: return widgets.VBox([widgets.Label("Error: Stop data for UI not provided.")])
+    
+    stop_info_for_planner_methods = planner.get_stop_info(stops_df_for_ui) 
+
+    try:
+        stops_pd_ui = stops_df_for_ui.select("stop_id", "stop_name").toPandas().dropna(subset=['stop_name']).drop_duplicates(subset=['stop_name'])
+        stop_names_map_ui = dict(zip(stops_pd_ui['stop_name'], stops_pd_ui['stop_id']))
+        if not stop_names_map_ui: raise ValueError("No stop names for UI dropdowns.")
+    except Exception as e:
+        print(f"Error preparing UI stop names: {e}"); return widgets.VBox([widgets.Label("Error: UI stop names.")])
+        
+    dep_dropdown = widgets.Dropdown(options=sorted(stop_names_map_ui.keys()), description='From:', layout=widgets.Layout(width='350px'))
+    arr_dropdown = widgets.Dropdown(options=sorted(stop_names_map_ui.keys()), description='To:', layout=widgets.Layout(width='350px'))
+    date_picker_ui = widgets.DatePicker(description='Date:', value=datetime.now().date(), layout=widgets.Layout(width='220px'))
+    dep_time_text = widgets.Text(description='Depart (HH:MM):', value='08:00', placeholder='HH:MM', layout=widgets.Layout(width='220px'))
+    arr_time_text = widgets.Text(description='Arrive By (HH:MM):', value='', placeholder='HH:MM (optional)', layout=widgets.Layout(width='220px'))
+    use_dep_time_cb = widgets.Checkbox(value=True, description='Use Dep Time', indent=False, layout=widgets.Layout(width='150px'))
+    use_arr_time_cb = widgets.Checkbox(value=False, description='Use Arr Constraint', indent=False, layout=widgets.Layout(width='180px'))
+    conf_slider = widgets.SelectionSlider(options=[('50%',0.5),('75%',0.75),('90%',0.9),('95%',0.95)],value=0.75,description='Confidence:',layout=widgets.Layout(width='300px'))
+    max_opts_slider = widgets.IntSlider(value=3,min=1,max=10,step=1,description='Max Options:',layout=widgets.Layout(width='300px'))
+    search_btn = widgets.Button(description='Search Options',button_style='success',layout=widgets.Layout(width='180px'))
+    
+    results_out = widgets.Output(); map_out = widgets.Output(); 
+    _cached_formatted_paths = [] # Moved here to be in the broader scope for callbacks
+    
+    route_selection_dropdown = widgets.Dropdown(description='View Route on Map:', disabled=True, layout=widgets.Layout(width='450px'))
+
+    def on_route_selected_for_map(change): # This callback needs access to _cached_formatted_paths
+        map_out.clear_output(wait=True)
+        selected_route_label_or_value = change.new 
+        
+        if not _cached_formatted_paths: return
+
+        # The 'value' of the dropdown will be the index if options are (label, index)
+        # The 'label' attribute will be the string label.
+        # We set .options as list of (label, index) tuples, so change.new will be the index (the value part)
+        selected_idx = selected_route_label_or_value 
+        
+        try:
+            if isinstance(selected_idx, int) and 0 <= selected_idx < len(_cached_formatted_paths):
+                selected_path_data = _cached_formatted_paths[selected_idx]
+                with map_out: display(planner.visualize_path(selected_path_data, stop_info_for_planner_methods))
+            # else if selected_idx is None (e.g. dropdown cleared) do nothing
+        except Exception as e:
+             with map_out: print(f"Error selecting route for map (idx: {selected_idx}): {e}")
+
+    route_selection_dropdown.observe(on_route_selected_for_map, names='value') # Observe 'value'
+
+    def on_search_clicked(b):
+        nonlocal _cached_formatted_paths 
+        results_out.clear_output(wait=True); map_out.clear_output(wait=True)
+        route_selection_dropdown.options = [] 
+        route_selection_dropdown.value = None # Reset value
+        route_selection_dropdown.disabled = True
+        _cached_formatted_paths = []
+
+        with results_out:
+            try:
+                src_name=dep_dropdown.value; tgt_name=arr_dropdown.value
+                if not src_name or not tgt_name: print("Select stops."); return
+                src_id=stop_names_map_ui.get(src_name); tgt_id=stop_names_map_ui.get(tgt_name)
+                if not src_id or not tgt_id: print("Invalid stops."); return
+                dep_td_val, arr_constr_td_val = None, None; query_parts = [f"Search: {src_name} to {tgt_name}"]
+                dep_time_specified_and_valid = False
+                if use_dep_time_cb.value and dep_time_text.value.strip():
+                    try:
+                        h,m=map(int,dep_time_text.value.split(':')); 
+                        if not (0<=h<=23 and 0<=m<=59): raise ValueError("Time component out of range.")
+                        dep_td_val=timedelta(hours=h,minutes=m)
+                        query_parts.append(f"depart at/after {planner._format_time(dep_td_val)}"); dep_time_specified_and_valid=True
+                    except ValueError: print(f"Invalid Dep Time: '{dep_time_text.value}'. Use HH:MM."); return
+                elif use_dep_time_cb.value and not dep_time_text.value.strip(): print("Dep time selected, but no time entered."); return
+                arr_constraint_specified_and_valid = False
+                if use_arr_time_cb.value and arr_time_text.value.strip():
+                    try:
+                        h_a,m_a=map(int,arr_time_text.value.split(':')); 
+                        if not (0<=h_a<=23 and 0<=m_a<=59): raise ValueError("Time component out of range.")
+                        arr_constr_td_val=timedelta(hours=h_a,minutes=m_a)
+                        query_parts.append(f"arrive by {planner._format_time(arr_constr_td_val)}"); arr_constraint_specified_and_valid=True
+                    except ValueError: print(f"Invalid Arr Time: '{arr_time_text.value}'. Use HH:MM."); return
+                elif use_arr_time_cb.value and not arr_time_text.value.strip(): print("Arr constraint selected, but no time entered."); return
+                if not (use_dep_time_cb.value and dep_time_specified_and_valid) and \
+                   not (use_arr_time_cb.value and arr_constraint_specified_and_valid):
+                    if not use_dep_time_cb.value and not use_arr_time_cb.value: print("Please specify & enable a time criteria.")
+                    return 
+                conf_val=conf_slider.value; max_opts_val=max_opts_slider.value
+                query_parts.append(f"Conf: {int(conf_val*100)}%"); print(", ".join(query_parts))
+                paths_list = planner.find_robust_paths(src_id, tgt_id, dep_td_val, arr_constr_td_val, conf_val, max_opts_val)
+                if not paths_list: print("No trip options found."); return
+                _cached_formatted_paths = planner.format_results(paths_list, stop_info_for_planner_methods)
+                
+                dropdown_options_list = []
+                for route_idx, route in enumerate(_cached_formatted_paths): 
+                    print(f"\n--- Option {route['route_id']} ---")
+                    print(f"Dep: {route['departure']} Arr: {route['arrival']} (Travel: {route['travel_time_mins']:.1f} min)")
+                    print(f"Transfers: {route['transfers']}, Walk: {route['walking_distance']}m, Conf: {route['confidence']}")
+                    dropdown_label = f"Option {route['route_id']} (Dep: {route['departure']}, Arr: {route['arrival']})"
+                    dropdown_options_list.append((dropdown_label, route_idx)) 
+                    
+                    # CORRECTED SEGMENT PRINTING LOGIC; had issues with no printing after 2 options
+                    if route.get('segments'): 
+                        print("  Segments:")
+                        for seg in route['segments']:
+                            print(f"    {seg['from_stop']} ({seg['departure']}) → {seg['to_stop']} ({seg['arrival']}) "
+                                  f"[{seg['type']}, {seg['duration_mins']:.1f}m, Trip: {seg['trip_id'] if seg['type']=='TRANSIT' else 'N/A'}]")
+                    elif route['departure'] == route['arrival'] and route.get('segments') and route['segments'][0]['type'] == "AT_STOP":
+                         print(f"    {route['segments'][0]['from_stop']} ({route['departure']}) - At destination (no travel).")
+                    elif route['departure'] == route['arrival']: # Fallback for source=target if segments is empty
+                         print(f"    {stop_info_for_planner_methods.get(src_id,{}).get('stop_name',src_id)} ({route['departure']}) - At destination (no travel).")
+
+                if _cached_formatted_paths:
+                    route_selection_dropdown.options = dropdown_options_list
+                    route_selection_dropdown.disabled = False
+                    if dropdown_options_list: # If there are options, set a default value to trigger map
+                        route_selection_dropdown.value = dropdown_options_list[0][1] # Setting first option by default
+                    with map_out: display(planner.visualize_path(_cached_formatted_paths[0], stop_info_for_planner_methods))
+                else: route_selection_dropdown.disabled = True
+            except Exception as e: print(f"Error during search: {e}"); import traceback; traceback.print_exc()
+    
+    search_btn.on_click(on_search_clicked)
+    time_input_controls = widgets.VBox([widgets.HBox([use_dep_time_cb, dep_time_text]), widgets.HBox([use_arr_time_cb, arr_time_text])])
+    input_ui_layout = widgets.VBox([widgets.HBox([dep_dropdown, arr_dropdown]),date_picker_ui, time_input_controls, widgets.HBox([conf_slider, max_opts_slider]),search_btn, route_selection_dropdown])
+    tabs_output = widgets.Tab([results_out, map_out]); tabs_output.set_title(0, 'Options'); tabs_output.set_title(1, 'Map')
+    display(widgets.VBox([input_ui_layout, tabs_output]))
+
 
 # %%
+def implement_robust_journey_planner(graph, stops_df, delay_model=None):
+    """
+    Implement the robust journey planner.
+    
+    Args:
+        graph: NetworkX DiGraph representing the time-dependent transport network
+        stops_df: DataFrame with stop information
+        delay_model: Model for predicting delays (can be None initially)
+        
+    Returns:
+        RobustJourneyPlanner instance and interactive UI
+    """
+    # Creating the planner
+    planner = RobustJourneyPlanner(
+        graph=graph,
+        delay_model=delay_model,
+        max_walking_distance=MAX_WALKING_DISTANCE_METERS,
+        # walking_speed=WALKING_SPEED_MPS, 
+    )
+    
+    ui = create_journey_planner_ui(planner, stops_df)
+    
+    return planner, ui
+
 
 # %%
+planner, ui = implement_robust_journey_planner(G, stops_lausanne_rt)
+display(ui)
+
+# Takes about 30 seconds to initialize and start
+
+
+# %%
+#  SOME COMMENTS 
+
+# so if super closer, maybe we can tell it to have a walking threshold 
+
+# waiting times?
+# walking optional ?
+
+# I realized they arent the shortest paths, and IDK if thats me or the data
+# but algo isnt YEN (k shortest paths)
+
+
+# MINE : Depart Source 07:00 -> Arrive Target 08:30 (Total Travel Time: 90 mins) --> Arrival time at destination focus
+# YEN B: Depart Source 07:30 -> Arrive Target 08:40 (Total Travel Time: 70 mins) --> Total travel time focus 
+
+# Algo desc:
+    # Dijkstra-based
+    # forward search
+    # k-earliest arrival paths
+    # heuristic for path diversity and loop reduction
+        # For ex: departure_time_threshold_for_diversity (dont leave at the same time)
+                  # and _has_significant_physical_stop_loop
+
+
+# later we'll incorporate a delay model
+
+# currently using dummy delay values 
+# specifically in this function
+
+#  planner = RobustJourneyPlanner(
+#         graph=graph,
+#         delay_model=delay_model,
+#         max_walking_distance=MAX_WALKING_DISTANCE_METERS,
+#         # walking_speed=WALKING_SPEED_MPS, 
+#         # delay_model = None --> default 
+#         # can modify to add any other model calibrations if needed 
+#     )
+
+# def _get_delay_distribution(self, trip_id, dep_stop_id, dep_time_td, day_of_week=None):
+#     if self.delay_model is None: return {"q50": 0, "q75": 0, "q90": 0, "q95": 0}
+#     return {"q50": 0, "q75": 0, "q90": 0, "q95": 0}
+
+
+
+
+
 
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
