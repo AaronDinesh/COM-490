@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.6
+#       jupytext_version: 1.11.2
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -41,6 +41,7 @@ import numpy as np
 import sys
 
 from pyspark.sql import SparkSession
+from pyspark.storagelevel import StorageLevel
 from random import randrange
 import pyspark.sql.functions as F
 #np.bool = np.bool_
@@ -70,7 +71,6 @@ except Exception as e:
 print("Creating new SparkSession...")
 
 
-
 spark = SparkSession\
             .builder\
             .appName(pwd.getpwuid(os.getuid()).pw_name)\
@@ -86,11 +86,18 @@ spark = SparkSession\
             .config('spark.sql.catalog.spark_catalog.warehouse', f'{hadoopFS}/user/{username}/final_project/warehouse')\
             .config("spark.sql.warehouse.dir", f'{hadoopFS}/user/{username}/final_project/spark/warehouse')\
             .config('spark.eventLog.gcMetrics.youngGenerationGarbageCollectors', 'G1 Young Generation')\
-            .config("spark.executor.memory", "10g")\
-            .config("spark.executor.cores", "2")\
-            .config("spark.executor.instances", "2")\
+            .config("spark.executor.memory", "9g")\
+            .config("spark.executor.cores", "4")\
+            .config("spark.executor.instances", "4")\
+            .config("spark.executor.extraJavaOptions", "-XX:+UseG1GC")\
             .master('yarn')\
             .getOrCreate()
+
+
+checkpoint_hdfs_path = f"{hadoopFS}/user/com-490/group/{groupName}/checkpoints"
+
+spark.sparkContext.setCheckpointDir(checkpoint_hdfs_path)
+print(f"Setting the checkpoint dir to be {checkpoint_hdfs_path}")
 
 # %%
 spark.sparkContext
@@ -416,10 +423,10 @@ stops_lausanne = stops_lausanne.select(\
       .distinct()
 
 # %%
-stops_lausanne.show(3)
+#stops_lausanne.show(3)
 
 # %%
-stops_lausanne.count()
+#stops_lausanne.count()
 
 # %%
 # rename the ist_july bpuic so we can see NULLs on misses
@@ -567,7 +574,9 @@ import math
 haversine_distance_udf = udf(haversine_distance_udf, DoubleType())
 
 # %%
-pairwise_distances = stops_lausanne.alias("a").crossJoin(stops_lausanne.alias("b")) \
+spark.conf.set("spark.sql.shuffle.partitions", 64) 
+
+pairwise_distances = stops_lausanne.repartition(64).alias("a").crossJoin(stops_lausanne.alias("b")) \
     .filter(col("a.stop_id") != col("b.stop_id")) \
     .select(
         col("a.stop_id").alias("stop_id_a"),
@@ -863,11 +872,11 @@ hist_ist = (
       .filter((col("arr_delay_s") > -120) & (col("arr_delay_s") < 3600))
       .filter((col("dep_delay_s") > -120) & (col("dep_delay_s") < 3600))
       .filter((hour(col("dep_actual")) >= lit(7)) & (hour(col("dep_actual")) < lit(18)))
-      .cache())
+      .persist(StorageLevel.MEMORY_AND_DISK))
 
 # %%
 # check the time range filter
-hist_ist.select(hour(col("dep_actual")).alias("h")).distinct().orderBy("h").show()
+# hist_ist.select(hour(col("dep_actual")).alias("h")).distinct().orderBy("h").show()
 
 # %%
 # sanity check, 1% of data sample
@@ -881,7 +890,7 @@ dep_q = sample.approxQuantile("dep_delay_s", [0.1, 0.5, 0.9], 0.01)
 print(f"arr_delay_s quantiles (10%,50%,90%): {arr_q}")
 print(f"dep_delay_s quantiles (10%,50%,90%): {dep_q}")
 
-sample.select("operating_day","arr_delay_s","dep_delay_s").show(5, truncate=False)
+# sample.select("operating_day","arr_delay_s","dep_delay_s").show(5, truncate=False)
 
 # %%
 # hourly delays percentile
@@ -894,7 +903,7 @@ hourly_stats = (
         percentile_approx(col("dep_delay_s"), [0.5,0.75,0.9,0.95]).alias("dep_qs"),
         F.count("*").alias("n_trips"))
       .orderBy("dep_hour")
-      .cache())
+      .persist(StorageLevel.MEMORY_AND_DISK))
 
 # trigger 
 #hourly_stats.head(1)
@@ -902,9 +911,9 @@ hourly_stats = (
 # %%
 #sanity check
 # are all 24 hours present?
-distinct_hours = hourly_stats.select("dep_hour").distinct().orderBy("dep_hour")
-print("Hours covered:", [r.dep_hour for r in distinct_hours.collect()])
-hourly_stats.show(24, truncate=False)
+# distinct_hours = hourly_stats.select("dep_hour").distinct().orderBy("dep_hour")
+# print("Hours covered:", [r.dep_hour for r in distinct_hours.collect()])
+# hourly_stats.show(24, truncate=False)
 
 # %% [markdown]
 # ## Feature engineering
@@ -917,7 +926,7 @@ hist_feat = (
         .withColumn("act_dep_hour", hour(to_timestamp(col("dep_actual"), "yyyy-MM-dd HH:mm:ss")))
         .withColumn("dow",((dayofweek(col("operating_day")) + 5) % 7) + 1) #days of week
         .withColumn("day_of_year",dayofyear(col("operating_day")))
-        .cache())
+        .persist(StorageLevel.MEMORY_AND_DISK))
 
 #trigger (for cache)
 #hist_feat.head(1)
@@ -947,7 +956,7 @@ hist_fact = hist_feat.select(
     "sched_dep_hour",
     "act_dep_hour",
     "dow",
-    "day_of_year").cache()
+    "day_of_year").persist(StorageLevel.MEMORY_AND_DISK)
 
 # %%
 # stops_geo: bpuic, name, coords
@@ -967,7 +976,7 @@ hist_route_station = (
       .join(routes_df, on="route_id", how="left")
       .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
       .withColumn("delay", col("arr_delay_s"))
-      .cache())
+      .persist(StorageLevel.MEMORY_AND_DISK))
 
 hist_route_station.createOrReplaceTempView("hist_route_station")
 
@@ -1034,7 +1043,7 @@ baseline_qs = (
           percentile_approx("delay", 0.90).alias("q90"),
           percentile_approx("delay", 0.95).alias("q95"),
           F.count("*").alias("n_obs"))
-      .cache())
+)
 
 baseline_qs.createOrReplaceTempView("baseline_quantiles")
 
@@ -1046,23 +1055,24 @@ baseline_qs.printSchema()
 
 # %%
 from hashlib import sha256
+from pyspark.ml import PipelineModel
 
 TRAINING = True
 
 cleaned_region_names = sorted(["".join(x.lower().split()) for x in region_names])
 joined_region_names = "".join(cleaned_region_names)
 region_hash = sha256(joined_region_names.encode('utf-8')).hexdigest()
-model_hdfs_path = f"{hadoopFS}/user/com-490/group/{GroupName}/{region_hash}/best_model"
+model_hdfs_path = f"{hadoopFS}/user/com-490/group/{groupName}/{region_hash}/best_model"
 
-print(f"Attempting to load the RandomForest PipelineModel from: {model_path_rf_to_load}")
+print(f"Attempting to load the RandomForest PipelineModel from: {model_hdfs_path}")
 
 try:
     # Load the PipelineModel
-    resid_model = PipelineModel.load(model_path_rf_to_load)
-    print(f"PipelineModel loaded successfully from {model_path_rf_to_load}")
+    resid_model = PipelineModel.load(model_hdfs_path)
+    print(f"PipelineModel loaded successfully from {model_hdfs_path}")
     TRAINING = False
 except Exception as e:
-    print(f"Could not find a PipelineModel to load for the regions {region_names} at {model_path_rf_to_load}")
+    print(f"Could not find a PipelineModel to load for the regions {region_names} at {model_hdfs_path}")
     print("Retraining the model...")
 
 
@@ -1079,6 +1089,20 @@ data = final_features.join(
     baseline_qs.select("route_id","bpuic","sched_dep_hour","q50","q75","q90","q95"),
     on=["route_id","bpuic","sched_dep_hour"], how="left").withColumn("resid_label", col("delay") - col("q50"))
 
+
+## This allows us to save the RDDs to HDFS. The count is just there to let SPARK know how to query this again if it ever gets lost.
+hist_ist = hist_ist.checkpoint()        # writes a safe copy to HDFS
+hist_ist.count()
+hist_feat = hist_feat.checkpoint()
+hist_feat.count()
+final_features = final_features.checkpoint()
+final_features.count()
+
+## We unpersist some RDDs to free up some space here
+final_features.unpersist()
+hist_feat.unpersist()
+hist_ist.unpersist()
+
 # %%
 # split the dataset
 train, valid, test = data.randomSplit([0.7,0.15,0.15], seed=42)
@@ -1087,14 +1111,14 @@ train, valid, test = data.randomSplit([0.7,0.15,0.15], seed=42)
 # sample test, take a small 5% sample of train to verify pipeline
 # train_small = train.sample(fraction=0.05, seed=42)
 
-# feature_cols = [
-#     "scheduled_tt","sched_dep_hour","act_dep_hour",
-#     "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
-#     "stop_lat","stop_lon","transfer_degree","min_transfer_time",
-#     "temperature","precipitation","wind_speed",
-#     "q50"]  # include baseline median
+feature_cols = [
+    "scheduled_tt","sched_dep_hour","act_dep_hour",
+    "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
+    "stop_lat","stop_lon","transfer_degree","min_transfer_time",
+    "temperature","precipitation","wind_speed",
+    "q50"]  # include baseline median
 
-# assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
 
 # rf_small = RandomForestRegressor(
 #     labelCol="resid_label", featuresCol="features",
@@ -1178,9 +1202,7 @@ if TRAINING:
     for pred_col, rmse_val in rmse_results.items():
         print(f" - {pred_col}: {rmse_val}")
 else:
-    print("Skipping Validation step since TRAINING is false")
-
-    
+    print("Skipping Validation step since TRAINING is false") 
 
 # %% [markdown]
 # ### Hyperparameter Tuning
@@ -1211,7 +1233,7 @@ if TRAINING:
 
     evaluator_rf = RegressionEvaluator(labelCol="resid_label", predictionCol="prediction", metricName="rmse")
 
-    cv_rf = CrossValidator(estimator=pipeline_rf,
+    cv_rf = CrossValidator(estimator=pipeline,
                            estimatorParamMaps=paramGrid_rf,
                            evaluator=evaluator_rf,
                            numFolds=3,  # Use 3 folds for cross-validation. Adjust as needed.
@@ -1325,18 +1347,15 @@ if TRAINING:
     joined_region_names = "".join(cleaned_region_names)
     region_hash = sha256(joined_region_names.encode('utf-8')).hexdigest()
 
-    model_hdfs_path = f"{hadoopFS}/user/com-490/group/{GroupName}/{region_hash}/best_model"
-    print(f"Attempting to save the trained RandomForest PipelineModel to: {model_path_rf}")
+    model_hdfs_path = f"{hadoopFS}/user/com-490/group/{groupName}/{region_hash}/best_model"
+    print(f"Attempting to save the trained RandomForest PipelineModel to: {model_hdfs_path}")
 
     try:
         # To overwrite if the model path already exists
-        bestPipelineModel_rf.write().overwrite().save(model_path_rf)
-        print(f"PipelineModel saved successfully to {model_path_rf}")
+        resid_model.write().overwrite().save(model_hdfs_path)
+        print(f"PipelineModel saved successfully to {model_hdfs_path}")
     except Exception as e:
         print(f"Error saving model: {e}")
-
-    
-
 
 # %%
 
