@@ -396,11 +396,11 @@ pdf = pd.DataFrame(rows, columns=cols)
 stops_lausanne = spark.createDataFrame(pdf)
 
 # (optional) inspect
-stops_lausanne.printSchema()
-print("Rows fetched:", stops_lausanne.count())
+# stops_lausanne.printSchema()
+# print("Rows fetched:", stops_lausanne.count())
 
 # %%
-stops_lausanne
+# stops_lausanne
 # ### Getting stops with realtime data for Lausanne region:
 
 
@@ -574,9 +574,11 @@ import math
 haversine_distance_udf = udf(haversine_distance_udf, DoubleType())
 
 # %%
-spark.conf.set("spark.sql.shuffle.partitions", 64) 
+NUM_PARTITIONS = 256
 
-pairwise_distances = stops_lausanne.repartition(64).alias("a").crossJoin(stops_lausanne.alias("b")) \
+spark.conf.set("spark.sql.shuffle.partitions", NUM_PARTITIONS) 
+
+pairwise_distances = stops_lausanne.repartition(NUM_PARTITIONS).alias("a").crossJoin(stops_lausanne.alias("b")) \
     .filter(col("a.stop_id") != col("b.stop_id")) \
     .select(
         col("a.stop_id").alias("stop_id_a"),
@@ -589,8 +591,11 @@ pairwise_distances = stops_lausanne.repartition(64).alias("a").crossJoin(stops_l
 
 stop_to_stop_df = pairwise_distances.filter(col("distance") <= 500)
 
+
+stop_to_stop_df = stop_to_stop_df.checkpoint()
 stop_to_stop_df.show(5)
 stop_to_stop_df.printSchema()
+stop_to_stop_df.count()
 
 
 # %%
@@ -602,7 +607,7 @@ lausanne_stop_times = joined_df.withColumn(
     "arrival_td", to_timestamp("arrival_time", "HH:mm:ss")
 )
 
-# %% jupyter={"source_hidden": true}
+# %% jupyter={"source_hidden": true} vscode={"languageId": "shellscript"}
 # old graph version 
 # import networkx as nx
 # from datetime import timedelta
@@ -872,7 +877,7 @@ hist_ist = (
       .filter((col("arr_delay_s") > -120) & (col("arr_delay_s") < 3600))
       .filter((col("dep_delay_s") > -120) & (col("dep_delay_s") < 3600))
       .filter((hour(col("dep_actual")) >= lit(7)) & (hour(col("dep_actual")) < lit(18)))
-      .persist(StorageLevel.MEMORY_AND_DISK))
+      .persist(StorageLevel.DISK_ONLY))
 
 # %%
 # check the time range filter
@@ -880,22 +885,23 @@ hist_ist = (
 
 # %%
 # sanity check, 1% of data sample
-sample = hist_ist.sample(fraction=0.01, seed=42)
+# sample = hist_ist.sample(fraction=0.01, seed=42)
 
-print("Sample size:", sample.count())
+# print("Sample size:", sample.count())
 
-# compute a few approximate quantiles
-arr_q = sample.approxQuantile("arr_delay_s", [0.1, 0.5, 0.9], 0.01)
-dep_q = sample.approxQuantile("dep_delay_s", [0.1, 0.5, 0.9], 0.01)
-print(f"arr_delay_s quantiles (10%,50%,90%): {arr_q}")
-print(f"dep_delay_s quantiles (10%,50%,90%): {dep_q}")
+# # compute a few approximate quantiles
+# arr_q = sample.approxQuantile("arr_delay_s", [0.1, 0.5, 0.9], 0.01)
+# dep_q = sample.approxQuantile("dep_delay_s", [0.1, 0.5, 0.9], 0.01)
+# print(f"arr_delay_s quantiles (10%,50%,90%): {arr_q}")
+# print(f"dep_delay_s quantiles (10%,50%,90%): {dep_q}")
+# sample.unpersist()
 
 # sample.select("operating_day","arr_delay_s","dep_delay_s").show(5, truncate=False)
 
 # %%
 # hourly delays percentile
 hourly_stats = (
-    hist_ist
+    hist_ist.sample(withReplacement=False,fraction=0.3, seed=42) 
       .withColumn("dep_hour", hour(col("dep_actual")))
       .groupBy("dep_hour")
       .agg(
@@ -903,7 +909,7 @@ hourly_stats = (
         percentile_approx(col("dep_delay_s"), [0.5,0.75,0.9,0.95]).alias("dep_qs"),
         F.count("*").alias("n_trips"))
       .orderBy("dep_hour")
-      .persist(StorageLevel.MEMORY_AND_DISK))
+      .persist(StorageLevel.DISK_ONLY))
 
 # trigger 
 #hourly_stats.head(1)
@@ -925,28 +931,30 @@ hist_feat = (
         .withColumn("sched_dep_hour", hour(to_timestamp(col("dep_time"), "yyyy-MM-dd HH:mm:ss")))
         .withColumn("act_dep_hour", hour(to_timestamp(col("dep_actual"), "yyyy-MM-dd HH:mm:ss")))
         .withColumn("dow",((dayofweek(col("operating_day")) + 5) % 7) + 1) #days of week
-        .withColumn("day_of_year",dayofyear(col("operating_day")))
-        .persist(StorageLevel.MEMORY_AND_DISK))
+        .withColumn("day_of_year",dayofyear(col("operating_day"))))
 
+hourly_stats.unpersist()
+hist_ist.unpersist()
 #trigger (for cache)
 #hist_feat.head(1)
 
 # %%
-#sanity check
-sample_feat = hist_feat.sample(fraction=0.01, seed=42)
-sample_feat.printSchema()
+# #sanity check
+# sample_feat = hist_feat.sample(fraction=0.01, seed=42)
+# sample_feat.printSchema()
 
-print("\nSample rows with time features:")
-sample_feat.select("dep_time","dep_actual","sched_dep_hour","act_dep_hour","operating_day","dow").limit(5).show(truncate=False)
+# print("\nSample rows with time features:")
+# sample_feat.select("dep_time","dep_actual","sched_dep_hour","act_dep_hour","operating_day","dow").limit(5).show(truncate=False)
 
-hours = sorted(r.sched_dep_hour for r in sample_feat.select("sched_dep_hour").distinct().collect())
-days  = sorted(r.dow for r in sample_feat.select("dow").distinct().collect())
-print(f"\nsched_dep_hour values in sample: {hours}")
-print(f"dow values in sample: {days}")
+# hours = sorted(r.sched_dep_hour for r in sample_feat.select("sched_dep_hour").distinct().collect())
+# days  = sorted(r.dow for r in sample_feat.select("dow").distinct().collect())
+# print(f"\nsched_dep_hour values in sample: {hours}")
+# print(f"dow values in sample: {days}")
 
 
 # %%
 # take interesting column
+## Added a subsampling to reduce memory pressure
 hist_fact = hist_feat.select(
     "bpuic",
     "trip_id",
@@ -956,7 +964,9 @@ hist_fact = hist_feat.select(
     "sched_dep_hour",
     "act_dep_hour",
     "dow",
-    "day_of_year").persist(StorageLevel.MEMORY_AND_DISK)
+    "day_of_year").persist(StorageLevel.DISK_ONLY)
+
+hist_feat.unpersist()
 
 # %%
 # stops_geo: bpuic, name, coords
@@ -969,16 +979,31 @@ trips_df  = spark.table("iceberg.sbb.trips").select("trip_id", "route_id")
 routes_df = spark.table("iceberg.sbb.routes").select("route_id", "route_desc", "route_type")
 
 # %%
-hist_route_station = (
-    hist_fact
-      .join(stops_geo, on="bpuic", how="left")
-      .join(trips_df, on="trip_id", how="left")
-      .join(routes_df, on="route_id", how="left")
-      .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
-      .withColumn("delay", col("arr_delay_s"))
-      .persist(StorageLevel.MEMORY_AND_DISK))
+from pyspark.sql.functions import broadcast
 
+# hist_route_station = (
+#     hist_fact
+#       .join(stops_geo, on="bpuic", how="left")
+#       .join(trips_df, on="trip_id", how="left")
+#       .join(routes_df, on="route_id", how="left")
+#       .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
+#       .withColumn("delay", col("arr_delay_s"))
+#       .persist(StorageLevel.DISK_ONLY))
+
+
+hist_route_station = (hist_fact
+      .join(broadcast(stops_geo), on="bpuic", how="left")
+      .join(broadcast(trips_df), on="trip_id", how="left")
+      .join(broadcast(routes_df), on="route_id", how="left")
+      .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
+      .withColumn("delay", col("arr_delay_s"))                       
+      .select("trip_id","bpuic","delay","route_id","route_desc","route_type",
+              "stop_lat","stop_lon","scheduled_tt","arr_delay_s",
+              "sched_dep_hour","act_dep_hour","dow","day_of_year"))
+# hist_route_station.count() # Materialize and cache
 hist_route_station.createOrReplaceTempView("hist_route_station")
+hist_fact.unpersist()
+
 
 # %%
 # sanity check
@@ -1002,9 +1027,11 @@ transfer_stats = (
 # join transfer
 feat_with_transfer = (
     hist_route_station
-      .join(transfer_stats, hist_route_station.bpuic == transfer_stats.from_bpuic, how="left")
+      .join(broadcast(transfer_stats), hist_route_station.bpuic == transfer_stats.from_bpuic, how="left")
       .drop("from_bpuic")
       .na.fill({"min_transfer_time": 2, "transfer_degree": 0}))
+
+hist_route_station.unpersist()
 
 # weather
 feat_with_weather = (
@@ -1017,7 +1044,19 @@ feat_with_weather = (
         .withColumn("doy_sin", sin(2 * lit(math.pi) * col("day_of_year") / lit(365)))
         .withColumn("doy_cos", cos(2 * lit(math.pi) * col("day_of_year") / lit(365))))
 
+feat_with_transfer.unpersist()
+
 # final features col
+# final_features = (
+#     feat_with_weather
+#       .select(
+#          "trip_id", "bpuic", "route_id", "route_desc", "route_type",
+#          "scheduled_tt", "delay", "sched_dep_hour", "act_dep_hour", "dow", 
+#          "day_of_year", "hour_sin", "hour_cos", "doy_sin", "doy_cos", 
+#          "stop_lat", "stop_lon", "transfer_degree", "min_transfer_time",
+#          "temperature", "precipitation", "wind_speed").dropDuplicates())
+
+
 final_features = (
     feat_with_weather
       .select(
@@ -1025,9 +1064,10 @@ final_features = (
          "scheduled_tt", "delay", "sched_dep_hour", "act_dep_hour", "dow", 
          "day_of_year", "hour_sin", "hour_cos", "doy_sin", "doy_cos", 
          "stop_lat", "stop_lon", "transfer_degree", "min_transfer_time",
-         "temperature", "precipitation", "wind_speed").dropDuplicates())
+         "temperature", "precipitation", "wind_speed"))
 
 final_features.createOrReplaceTempView("segment_features")
+feat_with_weather.unpersist()
 
 # %%
 final_features.printSchema()
@@ -1090,18 +1130,18 @@ data = final_features.join(
     on=["route_id","bpuic","sched_dep_hour"], how="left").withColumn("resid_label", col("delay") - col("q50"))
 
 
-## This allows us to save the RDDs to HDFS. The count is just there to let SPARK know how to query this again if it ever gets lost.
-hist_ist = hist_ist.checkpoint()        # writes a safe copy to HDFS
-hist_ist.count()
-hist_feat = hist_feat.checkpoint()
-hist_feat.count()
+# ## This allows us to save the RDDs to HDFS. The count is just there to let SPARK know how to query this again if it ever gets lost.
+# hist_ist = hist_ist.checkpoint()        # writes a safe copy to HDFS
+# hist_ist.count()
+# hist_feat = hist_feat.checkpoint()
+# hist_feat.count()
 final_features = final_features.checkpoint()
 final_features.count()
 
 ## We unpersist some RDDs to free up some space here
 final_features.unpersist()
-hist_feat.unpersist()
-hist_ist.unpersist()
+# hist_feat.unpersist()
+# hist_ist.unpersist()
 
 # %%
 # split the dataset
@@ -1338,7 +1378,7 @@ if TRAINING:
 else:
   print("Skipping testing of best model since TRAINING is false")
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 from hashlib import sha256
 
 # # Saving the best model
@@ -1402,34 +1442,34 @@ rf_pipeline = Pipeline(stages=[assembler, rf])
 rf_model = rf_pipeline.fit(train_df)
 print("RandomForest training complete")'''
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
 
 # %% [markdown]
 # ## Model validation
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # IV. Route Planning Algorithm
-# %%
+# %% vscode={"languageId": "shellscript"}
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -1931,7 +1971,7 @@ def create_journey_planner_ui(planner, stops_df_for_ui): # stops_df_for_ui is Sp
     display(widgets.VBox([input_ui_layout, tabs_output]))
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 def implement_robust_journey_planner(graph, stops_df, delay_model=None):
     """
     Implement the robust journey planner.
@@ -1957,14 +1997,14 @@ def implement_robust_journey_planner(graph, stops_df, delay_model=None):
     return planner, ui
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 planner, ui = implement_robust_journey_planner(G, stops_lausanne_rt)
 display(ui)
 
 # Takes about 30 seconds to initialize and start
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 #  SOME COMMENTS 
 
 # so if super closer, maybe we can tell it to have a walking threshold 
@@ -2014,14 +2054,14 @@ display(ui)
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # V. Validation
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 spark.stop()
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
@@ -2058,14 +2098,14 @@ spark.stop()
 #     <b>Try to use as much SQL as possible and avoid using pandas operations.</b>
 # </div>
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 import os
 import warnings
 
 warnings.simplefilter(action='ignore', category=UserWarning)
 warnings.filterwarnings("ignore", category=UserWarning, message="pandas only supports SQLAlchemy connectable .*")
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 import base64 as b64
 import json
 import time
@@ -2082,7 +2122,7 @@ def getUsername():
     return obj.get('sub'), time_left
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 username, validity_h = getUsername()
 hadoopFS = os.environ.get('HADOOP_FS')
 namespace = 'iceberg.' + username
@@ -2100,7 +2140,7 @@ print(f"your group is: {groupName}")
 # %% [markdown]
 # ---
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 import trino
 from contextlib import closing
 from urllib.parse import urlparse
@@ -2123,7 +2163,7 @@ conn = connect(
 
 print('Connected!')
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 import pandas as pd
 
 pd.read_sql(f"""SHOW TABLES IN {sharedNS}""", conn)
@@ -2139,7 +2179,7 @@ pd.read_sql(f"""SHOW TABLES IN {sharedNS}""", conn)
 #
 # The generator should implement an out-of-core approach, meaning it should limit memory usage by fetching results incrementally, rather than loading all data into memory at once.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 def sql_fetch(queries, conn, batch_size=100, with_column_names=True):
     if isinstance(queries, str):
         queries = [queries]
@@ -2166,7 +2206,7 @@ def sql_fetch(queries, conn, batch_size=100, with_column_names=True):
 #
 # Identify the field(s) used across all three tables to represent stop locations. Analyze their value ranges, format patterns, null and invalid values, and identify any years when null or invalid values are more prevalent. Use this information to implement the necessary transformations for reliably joining the tables on these stop locations.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO
 # Inspect the first couple lines of the three tables:
 from itertools import islice
@@ -2203,7 +2243,7 @@ for table in tables:
 # <b>sbb_stop_times:</b>
 # - stop_id
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Preparing the queries:
 
 def basic_info(table, cols, sample = False, sample_rate = 0.1):
@@ -2222,15 +2262,15 @@ def basic_info(table, cols, sample = False, sample_rate = 0.1):
     return query
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = basic_info("sbb_istdaten", ["bpuic", "stop_name"])
 pretty_table('sbb_istdaten', query, conn)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = basic_info("sbb_stops", ["stop_id", "stop_name"])
 pretty_table('sbb_stops', query, conn)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = basic_info("sbb_stop_times", ["stop_id"])
 pretty_table('sbb_stop_times', query, conn)
 
@@ -2239,7 +2279,7 @@ pretty_table('sbb_stop_times', query, conn)
 #
 # sbb_stops is smaller with  roughly 12 million rows, while sbb_stop_times is the biggest table with over 3 billion rows! In the sbb_stops and sbb_stop_times data, we notice zero null or empty stop_ids, although perhaps some unconventional number has been chosen to represent the NULL stop and therefore bypasses initial detection. We also notice that both datatables have the same min and max stop_id which is encouraging for joining them together, however it is not the same as sbb_istdaten. sbb_stops has over double the amount of unique stop_ids (\~93,000) compared to unique stop_names (\~42,000), which suggests that perhaps two ID conventions have been used. sbb_stop_times has less unique stop_ids with (\~57,000).
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 import matplotlib.pyplot as plt
 def null_by_year(table,date_col, other_cols, sample = False, sample_rate = 1):
     query = f"SELECT YEAR({date_col}) AS year, COUNT(*) AS total_rows"
@@ -2301,12 +2341,12 @@ def plot_null_percentages_by_year(
     plt.show()
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = null_by_year("sbb_istdaten","operating_day", ["bpuic","stop_name"])
 df_ist = to_pd_table("sbb_istdaten", query, conn)
 df_ist
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 plot_null_percentages_by_year(df_ist,"sbb_istdaten")
 
 # %% [markdown]
@@ -2314,7 +2354,7 @@ plot_null_percentages_by_year(df_ist,"sbb_istdaten")
 #
 # Let us now begin the joining process by joining sbb_istdaten and sbb_stops by stop name to see how well they match up, we can then compare the id naming conventions and test to see if we get a better match that way.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # First count the number of matching distinct stop names
 # Note that we only sample the ist table, as it is orders of magnitude bigger
 query = f"""
@@ -2342,7 +2382,7 @@ pretty_table("sampled_stop_name_match_count", query, conn)
 # %% [markdown]
 # We see that overall the names seem to match somewhat well on the ist part at least, although stops has significantly more unique stop names, let's look at some individual matches to inspect stop_id:  
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Visually inspect some sample matches
 
 query = f"""
@@ -2373,7 +2413,7 @@ pretty_table("stop_name_match_visual_inspection", query, conn, limit=40)
 #   
 # Let us count how many rows of sbb_stops follow each format
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = fr"""
 WITH distinct_stop_ids AS (
     SELECT DISTINCT stop_id
@@ -2399,7 +2439,7 @@ pretty_table("refined stop_id formats for sbb_stops", query, conn)
 # It looks like the majority of IDs do follow this format!
 # Lets do a sanity check with the other two tables
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = fr"""
 WITH distinct_stop_ids AS (
     SELECT DISTINCT stop_id
@@ -2420,7 +2460,7 @@ ORDER BY count DESC
 """
 pretty_table("refined stop_id formats for sbb_stop_times", query, conn)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = fr"""
 WITH distinct_stop_ids AS (
     SELECT DISTINCT bpuic
@@ -2445,7 +2485,7 @@ pretty_table("refined stop_id formats for sbb_istdaten", query, conn)
 # %% [markdown]
 # We see that istdaten and stop_times almost exactly fall in the given categories! Let's check how many matches we now get on stop_id for all three tables:
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = f"""
 WITH
 -- Distinct bpuic from istdaten (sampled for performance)
@@ -2490,7 +2530,7 @@ pretty_table("bpuic_match_summary_across_tables", query, conn)
 #
 # We could now perform the full join with the following code:
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 if False:
     output_table_name = f"{sharedNS}.joined_istdaten_stops_times_clean"
     
@@ -2586,13 +2626,13 @@ if False:
     print(f"Table created successfully: {output_table_name}")
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 if False:
     # Check structure of joined table
     query = f"SELECT * FROM {output_table_name}"
     pretty_table(output_table_name, query, conn,5)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 if False:
     # Check row count of joined table
     query = f"SELECT COUNT(*) AS row_count FROM {output_table_name}"
@@ -2632,7 +2672,7 @@ if False:
 #
 # <img src="./figs/1a-example.png" alt="1a-example.png" width="400"/>
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # %%time
 query = f"""
 SELECT 
@@ -2647,7 +2687,7 @@ ORDER BY 1, 2, 3
 """
 df_ttype = to_pd_table("Monthly stop events by transport type", query, conn)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 df_ttype["month_year"] = pd.to_datetime({
     "year": df_ttype["year"],
     "month": df_ttype["month"],
@@ -2655,7 +2695,7 @@ df_ttype["month_year"] = pd.to_datetime({
 }).dt.strftime("%Y-%m")
 df_ttype
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - display the results to match the graph above
 import plotly.express as px
 
@@ -2694,13 +2734,13 @@ fig.show()
 #
 # While it's a bit of an overkill, the safest approach is to drop and recreate the namespace the first time you run this notebook.
 
-# %% jupyter={"outputs_hidden": true}
+# %% jupyter={"outputs_hidden": true} vscode={"languageId": "shellscript"}
 list(sql_fetch([
     f"""DROP SCHEMA IF EXISTS {namespace} CASCADE""", # CASCADE will drop all the tables
     f"""CREATE SCHEMA IF NOT EXISTS {namespace}""",
 ], conn))
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # solving schema issues by manually creating user schema
 
 # def sql_fetch(queries, conn):
@@ -2714,7 +2754,7 @@ list(sql_fetch([
 # ], conn))
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # just checking that it worked
 # I reran the original sql_fetch code after creating shayakhm schema
 # schemas = pd.read_sql(f"SHOW SCHEMAS IN iceberg", conn)
@@ -2742,7 +2782,7 @@ list(sql_fetch([
 # ---
 # #### Solutions
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 output_table_name = f"{namespace}.sbb_stops_lausanne_region"
 
 # Drop the table if it already exists
@@ -2791,7 +2831,7 @@ with closing(conn.cursor()) as cur:
     print(f"Table created: {output_table_name}")
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO verify the results
 query = f"""
 SELECT * FROM {namespace}.sbb_stops_lausanne_region
@@ -2799,7 +2839,7 @@ LIMIT 5
 """
 pretty_table("sbb_stops_lausanne_region", query, conn)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = f"""
 SELECT COUNT(*) AS total_stops
 FROM {namespace}.sbb_stops_lausanne_region
@@ -2824,7 +2864,7 @@ pretty_table("Number of stops in Lausanne region", query, conn)
 # #### Solution
 #
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Create the data frame stops_df
 query = f"""
 WITH ist_july AS (
@@ -2851,11 +2891,11 @@ LEFT JOIN ist_july i
   ON l.bpuic = i.bpuic
 """
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # %%time
 stops_df= to_pd_table("Stops with/without real-time data (July 2024)", query, conn, limit = 1000)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Verify the results
 total_stops = len(stops_df)
 no_rt_stops = len(stops_df[stops_df["has_realtime"] == False])
@@ -2867,7 +2907,7 @@ print(f"Stops without real-time data: {no_rt_stops} ({pct_missing:.2f}%)")
 # Optional preview
 stops_df.head()
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Filter to stops without real-time data
 no_rt_stops_df = stops_df[stops_df["has_realtime"] == False]
 
@@ -2884,7 +2924,7 @@ display(no_rt_stops_df.head())
 #
 # * Use plotly or similar plot framework to display all the stop locations in Lausanne region on a map (scatter plot or heatmap), using a different color to highlight the stops for which istdaten data is available.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
 ### TODO - Display results of stops_df
 
@@ -2909,7 +2949,7 @@ fig.show()
 #     * _stop_id_b_: an _{sharedNS}.sbb_stops.stop_id_
 #     * _distance_: straight line distance in meters from _stop_id_a_ to _stop_id_b_
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # %%time
 ### TODO - create the stop to stop table
 
@@ -2976,7 +3016,7 @@ with closing(conn.cursor()) as cur:
 #
 # sing R as the Earth radius, 6371000 m.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Verify the results
 
 pd.read_sql(f"""SELECT COUNT(*) FROM {namespace}.sbb_stop_to_stop_lausanne_region""", conn)
@@ -3008,7 +3048,7 @@ pd.read_sql(f"""SELECT COUNT(*) FROM {namespace}.sbb_stop_to_stop_lausanne_regio
 # * Pay special attention to the value ranges of the _departure_time_ and _arrival_time_ fields in the _{sharedNS}.sbb_stop_times_ table.
 # * This new table will be used in the next exercise for a routing algorithm. We recommend reviewing the upcoming questions to determine the appropriate data types and potential transformations for the _departure_time_ and _arrival_time_ fields.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Create the table stop times as described above
 # # %%time
 ### TODO - Create the table stop times as described above
@@ -3089,14 +3129,14 @@ with closing(conn.cursor()) as cur:
 #
 # sbb_trips and sbb_calendar had two entries on the first week of July so we selected one of them to avoid duplicates.
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = f"""
 SELECT * FROM {sharedNS}.sbb_stop_times
 LIMIT 10
 """
 pretty_table("sbb_stop_times", query, conn, 10)
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Verify the results
 
 query = f"""
@@ -3110,7 +3150,7 @@ FROM (
 pd.read_sql_query(query, conn)
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = f"""
 SELECT COUNT(*) AS monday_pairs
 FROM (
@@ -3195,10 +3235,10 @@ pd.read_sql_query(query, conn)
 # %% [markdown]
 # **TODO**: Explain your algorithm, design decisions etc. here
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Peeking at the tables that we will be using 
 
-# %% jupyter={"outputs_hidden": true, "source_hidden": true}
+# %% jupyter={"outputs_hidden": true, "source_hidden": true} vscode={"languageId": "shellscript"}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_to_stop_lausanne_region
@@ -3206,7 +3246,7 @@ LIMIT 5
 """
 pretty_table("sbb_stop_to_stop_lausanne_region", query, conn, 5)
 
-# %% jupyter={"outputs_hidden": true, "source_hidden": true}
+# %% jupyter={"outputs_hidden": true, "source_hidden": true} vscode={"languageId": "shellscript"}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_times_lausanne_region
@@ -3214,7 +3254,7 @@ LIMIT 5
 """
 pretty_table("sbb_stop_times_lausanne_region", query, conn, 5)
 
-# %% jupyter={"outputs_hidden": true, "source_hidden": true}
+# %% jupyter={"outputs_hidden": true, "source_hidden": true} vscode={"languageId": "shellscript"}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_to_stop_lausanne_region
@@ -3222,13 +3262,13 @@ LIMIT 5
 """
 pretty_table("sbb_stop_to_stop_lausanne_region", query, conn, 5)
 
-# %% jupyter={"outputs_hidden": true}
+# %% jupyter={"outputs_hidden": true} vscode={"languageId": "shellscript"}
 # Install these necessary libraries please 
 # !pip install networkx
 # !pip install datetime
 # !pip install geopy
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Importing the necessary libraries that were not imported above
 import heapq
 import numpy as np
@@ -3240,12 +3280,12 @@ from IPython.display import display
 from geopy.distance import geodesic
 from datetime import datetime, timedelta
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Data Preparation
 # Using the sbb_stop_times_lausanne table, we are going to create a NetworkGx Graph.
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Prepping the data to build a graph 
 
 # Note: takes about a minute to run 
@@ -3274,7 +3314,7 @@ stop_names = dict(zip(lausanne_stops['stop_id'], lausanne_stops['stop_name']))
 
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Building the transport graph 
 # Note: it takes about 2-3 minutes to run
 
@@ -3312,7 +3352,7 @@ for trip_id, trip_group in lausanne_stop_times.groupby("trip_id"):
 
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # Adding the walking consideration
 # Note: takes about a minute to run
 
@@ -3361,7 +3401,7 @@ for _, row in walking_data.iterrows():
 
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Routing Algorithm
 
 # We decided to use a Dijkstra base + label-setting algorithm
@@ -3370,7 +3410,7 @@ for _, row in walking_data.iterrows():
 # and it explores nodes based on the current known shortest total travel time
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 
 # we input the chosen criteria in the run 
 def routing_algorithm(start_stop_id, start_time_input, max_duration_minutes):
@@ -3476,10 +3516,10 @@ def routing_algorithm(start_stop_id, start_time_input, max_duration_minutes):
 
 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ###TODO - Interactive Interface to Verify the Algorithm
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 # making the input widgets
 stop_dict = dict(sorted(zip(lausanne_stops['stop_name'], lausanne_stops['stop_id'])))
 start_stop_widget = widgets.Dropdown(options=stop_dict, description='Start Stop:')
@@ -3607,7 +3647,7 @@ display(widgets.VBox([
     start_stop_widget, hour_widget, minute_widget, duration_widget, run_button, output
 ]))
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 ### TODO - Others as you see fit.
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
@@ -3623,7 +3663,7 @@ display(widgets.VBox([
 #
 # This is unrealistic, as traveling between any two stops should take at least one minute. As a result, our algorithm sometimes shows transit segments with 0-minute durations. 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 query = f"""
 SELECT *
 FROM {namespace}.sbb_stop_times_lausanne_region
@@ -3656,7 +3696,7 @@ pretty_table("sbb_stop_times_lausanne_region", query, conn, 13)
 # Weird. Let us check the data to see if there are truly no bus/trains departing Bussigny at that time. Note: 8501117:0:1 == Bus
 #
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 time_filter = pd.to_timedelta("23:00:00")
 bussigny_departures = lausanne_stop_times[
     (lausanne_stop_times['stop_id'] == stop_dict['Bussigny']) &
@@ -3670,22 +3710,22 @@ bussigny_departures_sorted
 #
 # Let's take a closer look at each trip:
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 example_a= '932.TA.91-4-L-j24-1.313.R'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_a]
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 example_b = '914.TA.91-3-T-j24-1.687.R'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_b]
 
 # %% [markdown]
 # The trips above start AND end at Bussigny, explaining why they did not created edges in the graph to new stops. 
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 example_c = '297.TA.91-3-T-j24-1.874.H'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_c]
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 example_d = '277.TA.91-4-L-j24-1.293.H'
 lausanne_stop_times[lausanne_stop_times['trip_id'] == example_d]
 
@@ -3700,4 +3740,4 @@ lausanne_stop_times[lausanne_stop_times['trip_id'] == example_d]
 # Overall, the algorithm seems to function well, but there are a few issues to consider, as it doesn't always display the truly optimal paths to reach certain destinations.
 #
 
-# %%
+# %% vscode={"languageId": "shellscript"}
