@@ -1174,6 +1174,18 @@ baseline_qs.printSchema()
 
 # %% [markdown]
 # ## Hybrid Delay Model
+#
+# #### Students Note to TAs
+# The hybrid delay model could not be trained due to memory limits on the cluster. It seems that we are able to build the
+# final dataset yet during the process of training the model, the spark driver is not able to write some data into memory
+# and it looses RDDs. As a result the process restarts and the cycle continues. We tried all the suggestions from the TA
+# regarding using the new garbage collector and also subsampling the dataset. However, we ran into issues with even just
+# 30% of the dataset. We also tried to unpersist some dataframes that were no longer needed but we still could not train
+# the model. I think if we had access to more RAM we would be able to train the model and perform hyperparameter tuning.
+# The code below automatically loads the best model from the HDFS store if it exists and skips the training process. If no
+# model is found the code will retrain the model, perform hyperparameter tuning, and save it to the HDFS store. We really
+# did try everything we could think of but still nothing seemed to work. However with more RAM our code should be able to run.
+#
 
 # %%
 from hashlib import sha256
@@ -1181,8 +1193,15 @@ from pyspark.ml import PipelineModel
 
 TRAINING = True
 
+
+if isinstance(target_day_of_week, list):
+    day_of_week = sorted(["".join(x.lower().split()) for x in target_day_of_week])
+else:
+    day_of_week = [target_day_of_week.lower()]
+
+
 cleaned_region_names = sorted(["".join(x.lower().split()) for x in region_names])
-joined_region_names = "".join(cleaned_region_names)
+joined_region_names = "".join(cleaned_region_names + day_of_week)
 region_hash = sha256(joined_region_names.encode('utf-8')).hexdigest()
 model_hdfs_path = f"{hadoopFS}/user/com-490/group/{groupName}/{region_hash}/best_model"
 
@@ -2286,7 +2305,7 @@ def create_journey_planner_ui(planner, stops_df_for_ui): # stops_df_for_ui is Sp
     display(widgets.VBox([input_ui_layout, tabs_output]))
 
 
-# %% jupyter={"source_hidden": true} vscode={"languageId": "shellscript"}
+# %% jupyter={"source_hidden": true}
 # Putting it all together
 def implement_robust_journey_planner(graph, stops_df, delay_model=None):
     planner = OptimizedRobustJourneyPlanner(
@@ -2301,34 +2320,40 @@ def implement_robust_journey_planner(graph, stops_df, delay_model=None):
     return planner, ui
 
 
-# %% vscode={"languageId": "shellscript"}
+# %% [markdown]
+# ## The UI and Algorithm
+#
+# #### Students Note to TAs
+#
+# Takes about 30 seconds to initialize the UI
+# On average, routing algorithm can take anywhere from 20 seconds to 2 minutes to display routes, depending on the route length and the number of routes requested.
+#
+# Not average, 
+# While testing our routing algorithm, we found the farthest route to be from around the Lausanne, Ste-cathering area to St-Sulipce VD, Venoge Sud
+# where displaying 1 route took about 1.5 mins
+# However, it accurately mapped and showed the route
+
+# %%
 planner, ui = implement_robust_journey_planner(G_stops, stops_lausanne_rt)
 display(ui)
 
-# Takes about 30 seconds to initialize the UI
-# On average, routing algorithm can take anywhere from 20 seconds to 2 minutes to display routes, depending on the route length and the number of routes requested.
 
-# Not average, 
-# While testing our routing algorithm, we found the farthest route to be from around the Lausanne, Ste-cathering area to St-Sulipce VD, Venoge Sud
-# where dipsalying 1 route took about 1.5 mins
-# However, it accurately mapped and showed the route
-
-
-# %%
-# Small note #1: that little "None" that is printed after our UI does not directly mean that the algo didnt find routes
-# It's just an implicit return of create_journey_planner_ui function
-
-# In general though:
-# Our routing algorithm finds the earliest arrival path in a time-dependent graph.
-# It uses a modified Dijkstra’s algorithm that accounts for waiting times at each stop.
-# At each node, it explores only connections that depart after the current arrival time.
-# A priority queue maintains the next earliest connections to process based on arrival time.
-# The algorithm continues until it reaches the target stop or all options are exhausted.
-
-
-# Small note #2:
-# Difference between this algorithm and YEN
-# Us : Depart Source 07:00 -> Arrive Target 08:30 (Total Travel Time: 90 mins) --> Arrival time at destination focus
+# %% [markdown]
+# #### Students Note to TAs
+#
+# Small note #1:   
+# That little "None" that is printed after our UI does not directly mean that the algo didnt find routes  
+# It's just an implicit return of create_journey_planner_ui function  
+# In general though:  
+# Our routing algorithm finds the earliest arrival path in a time-dependent graph.   
+# It uses a modified Dijkstra’s algorithm that accounts for waiting times at each stop.   
+# At each node, it explores only connections that depart after the current arrival time.   
+# A priority queue maintains the next earliest connections to process based on arrival time.   
+# The algorithm continues until it reaches the target stop or all options are exhausted.   
+#
+# Small note #2:  
+# Difference between this algorithm and YEN   
+# Us : Depart Source 07:00 -> Arrive Target 08:30 (Total Travel Time: 90 mins) --> Arrival time at destination focus   
 # YEN : Depart Source 07:30 -> Arrive Target 08:40 (Total Travel Time: 70 mins) --> Total travel time focus 
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
