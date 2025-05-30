@@ -1467,7 +1467,7 @@ if TRAINING:
 else:
   print("Skipping testing of best model since TRAINING is false")
 
-# %% vscode={"languageId": "shellscript"}
+# %%
 from hashlib import sha256
 
 # # Saving the best model
@@ -1489,8 +1489,13 @@ from hashlib import sha256
 
 # Saving the best model
 if TRAINING:
+    if isinstance(target_day_of_week, list):
+        day_of_week = sorted(["".join(x.lower().split()) for x in target_day_of_week])
+    else:
+        day_of_week = [target_day_of_week.lower()]
+
     cleaned_region_names = sorted(["".join(x.lower().split()) for x in region_names])
-    joined_region_names = "".join(cleaned_region_names)
+    joined_region_names = "".join(cleaned_region_names + day_of_week)
     region_hash = sha256(joined_region_names.encode('utf-8')).hexdigest()
 
     model_hdfs_path = f"{hadoopFS}/user/com-490/group/{groupName}/{region_hash}/best_model"
