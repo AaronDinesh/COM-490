@@ -86,10 +86,12 @@ spark = SparkSession\
             .config('spark.sql.catalog.spark_catalog.warehouse', f'{hadoopFS}/user/{username}/final_project/warehouse')\
             .config("spark.sql.warehouse.dir", f'{hadoopFS}/user/{username}/final_project/spark/warehouse')\
             .config('spark.eventLog.gcMetrics.youngGenerationGarbageCollectors', 'G1 Young Generation')\
-            .config("spark.executor.memory", "9g")\
-            .config("spark.executor.cores", "4")\
-            .config("spark.executor.instances", "4")\
+            .config("spark.executor.memory", "10g")\
+            .config("spark.driver.memory", "10g")\
+            .config("spark.executor.cores", "2")\
+            .config("spark.executor.instances", "7")\
             .config("spark.executor.extraJavaOptions", "-XX:+UseG1GC")\
+            .config("spark.driver.maxResultSize", "10g")\
             .master('yarn')\
             .getOrCreate()
 
@@ -276,7 +278,7 @@ trips_f.show(3)
 # %% [markdown]
 # #### Setup Trino for Geospacial queries:
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 import os
 import warnings
 
@@ -412,15 +414,14 @@ ist_july_df = istdaten.filter((col("operating_day") >= lit("2024-07-01")) &\
       .select(regexp_extract(col("bpuic").cast("string"), "(\\d+)", 1).alias("bpuic"))\
       .distinct()
 
-# %%
+# %% vscode={"languageId": "shellscript"}
 stops_lausanne = stops_lausanne.select(\
-          col("stop_id"),\
-          col("stop_name"),\
-          col("stop_lat"),\
-          col("stop_lon"),\
+          col("stop_id"),
+          col("stop_name"),
+          col("stop_lat"),
+          col("stop_lon"),
           regexp_extract(col("stop_id"), "(\\d+)", 1).alias("bpuic")\
-      )\
-      .distinct()
+      ).distinct()
 
 # %%
 #stops_lausanne.show(3)
@@ -607,7 +608,7 @@ lausanne_stop_times = joined_df.withColumn(
     "arrival_td", to_timestamp("arrival_time", "HH:mm:ss")
 )
 
-# %% jupyter={"source_hidden": true} vscode={"languageId": "shellscript"}
+# %% jupyter={"source_hidden": true}
 # old graph version 
 # import networkx as nx
 # from datetime import timedelta
@@ -879,6 +880,8 @@ hist_ist = (
       .filter((hour(col("dep_actual")) >= lit(7)) & (hour(col("dep_actual")) < lit(18)))
       .persist(StorageLevel.DISK_ONLY))
 
+hist_ist.printSchema()
+
 # %%
 # check the time range filter
 # hist_ist.select(hour(col("dep_actual")).alias("h")).distinct().orderBy("h").show()
@@ -901,12 +904,12 @@ hist_ist = (
 # %%
 # hourly delays percentile
 hourly_stats = (
-    hist_ist.sample(withReplacement=False,fraction=0.3, seed=42) 
+    hist_ist 
       .withColumn("dep_hour", hour(col("dep_actual")))
       .groupBy("dep_hour")
       .agg(
         percentile_approx(col("arr_delay_s"), [0.5,0.75,0.9,0.95]).alias("arr_qs"),
-        percentile_approx(col("dep_delay_s"), [0.5,0.75,0.9,0.95]).alias("dep_qs"),
+        #percentile_approx(col("dep_delay_s"), [0.5,0.75,0.9,0.95]).alias("dep_qs"),
         F.count("*").alias("n_trips"))
       .orderBy("dep_hour")
       .persist(StorageLevel.DISK_ONLY))
@@ -927,11 +930,23 @@ hourly_stats = (
 # %%
 # time features
 hist_feat = (
-    hist_ist
+    hist_ist.sample(withReplacement=False, fraction=0.5, seed=42)
         .withColumn("sched_dep_hour", hour(to_timestamp(col("dep_time"), "yyyy-MM-dd HH:mm:ss")))
         .withColumn("act_dep_hour", hour(to_timestamp(col("dep_actual"), "yyyy-MM-dd HH:mm:ss")))
         .withColumn("dow",((dayofweek(col("operating_day")) + 5) % 7) + 1) #days of week
-        .withColumn("day_of_year",dayofyear(col("operating_day"))))
+        .withColumn("day_of_year",dayofyear(col("operating_day")))).select(
+            "bpuic",
+            "trip_id",
+            "arr_time",
+            "dep_time",
+            "arr_delay_s",
+            "sched_dep_hour",
+            "act_dep_hour",
+            "dow",
+            "day_of_year")
+
+    
+hist_feat.printSchema()
 
 hourly_stats.unpersist()
 hist_ist.unpersist()
@@ -954,7 +969,6 @@ hist_ist.unpersist()
 
 # %%
 # take interesting column
-## Added a subsampling to reduce memory pressure
 hist_fact = hist_feat.select(
     "bpuic",
     "trip_id",
@@ -972,11 +986,11 @@ hist_feat.unpersist()
 # stops_geo: bpuic, name, coords
 stops_geo = (spark.table("iceberg.sbb.stops")
          .withColumn("bpuic", regexp_extract("stop_id", "(\\d+)", 1).cast("int"))
-         .select("bpuic", "stop_name", "stop_lat", "stop_lon"))
+         .select("bpuic", "stop_lat", "stop_lon"))
 
 # trip and route
 trips_df  = spark.table("iceberg.sbb.trips").select("trip_id", "route_id")
-routes_df = spark.table("iceberg.sbb.routes").select("route_id", "route_desc", "route_type")
+routes_df = spark.table("iceberg.sbb.routes").select("route_id", "route_type")
 
 # %%
 from pyspark.sql.functions import broadcast
@@ -990,16 +1004,41 @@ from pyspark.sql.functions import broadcast
 #       .withColumn("delay", col("arr_delay_s"))
 #       .persist(StorageLevel.DISK_ONLY))
 
+# hist_route_station = (hist_fact
+#       .join(stops_geo, on="bpuic", how="left")
+#       .join(trips_df, on="trip_id", how="left")
+#       .join(routes_df, on="route_id", how="left")
+#       .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
+#       .withColumn("delay", col("arr_delay_s"))                       
+#       .select("trip_id","bpuic","delay","route_id","route_desc","route_type",
+#               "stop_lat","stop_lon","scheduled_tt","arr_delay_s",
+#               "sched_dep_hour","act_dep_hour","dow","day_of_year"))
 
-hist_route_station = (hist_fact
-      .join(broadcast(stops_geo), on="bpuic", how="left")
-      .join(broadcast(trips_df), on="trip_id", how="left")
-      .join(broadcast(routes_df), on="route_id", how="left")
-      .withColumn("scheduled_tt", unix_timestamp("arr_time") - unix_timestamp("dep_time"))
-      .withColumn("delay", col("arr_delay_s"))                       
-      .select("trip_id","bpuic","delay","route_id","route_desc","route_type",
-              "stop_lat","stop_lon","scheduled_tt","arr_delay_s",
-              "sched_dep_hour","act_dep_hour","dow","day_of_year"))
+
+stops_sel  = stops_geo.select("bpuic", "stop_lat", "stop_lon")
+trips_sel  = trips_df.select("trip_id", "route_id")
+routes_sel = routes_df.select("route_id", "route_type")
+
+hist_route_station = (
+    hist_fact
+      .join(trips_sel, "trip_id", "left")
+      .join(stops_sel,  "bpuic", "left")
+      .join(routes_sel, "route_id", "left")
+      .withColumn(
+          "scheduled_tt",
+          unix_timestamp("arr_time") - unix_timestamp("dep_time")
+      )
+      .withColumnRenamed("arr_delay_s", "delay")
+      .select(
+          "trip_id", "bpuic", "delay",
+          "route_id", "route_type",
+          "stop_lat", "stop_lon",
+          "scheduled_tt",
+          "sched_dep_hour", "act_dep_hour", "dow", "day_of_year"
+      )
+)
+
+
 # hist_route_station.count() # Materialize and cache
 hist_route_station.createOrReplaceTempView("hist_route_station")
 hist_fact.unpersist()
@@ -1036,9 +1075,9 @@ hist_route_station.unpersist()
 # weather
 feat_with_weather = (
     feat_with_transfer
-        .withColumn("temperature", lit(0.0))
-        .withColumn("precipitation", lit(0.0))
-        .withColumn("wind_speed", lit(0.0))
+        # .withColumn("temperature", lit(0.0))
+        # .withColumn("precipitation", lit(0.0))
+        # .withColumn("wind_speed", lit(0.0))
         .withColumn("hour_sin", sin(2 * lit(math.pi) * col("sched_dep_hour") / lit(24)))
         .withColumn("hour_cos", cos(2 * lit(math.pi) * col("sched_dep_hour") / lit(24)))
         .withColumn("doy_sin", sin(2 * lit(math.pi) * col("day_of_year") / lit(365)))
@@ -1057,14 +1096,22 @@ feat_with_transfer.unpersist()
 #          "temperature", "precipitation", "wind_speed").dropDuplicates())
 
 
+# final_features = (
+#     feat_with_weather
+#       .select(
+#          "trip_id", "bpuic", "route_id", "route_desc", "route_type",
+#          "scheduled_tt", "delay", "sched_dep_hour", "act_dep_hour", "dow", 
+#          "day_of_year", "hour_sin", "hour_cos", "doy_sin", "doy_cos", 
+#          "stop_lat", "stop_lon", "transfer_degree", "min_transfer_time",
+#          "temperature", "precipitation", "wind_speed"))
+
 final_features = (
     feat_with_weather
       .select(
-         "trip_id", "bpuic", "route_id", "route_desc", "route_type",
+         "trip_id", "bpuic", "route_id", "route_type",
          "scheduled_tt", "delay", "sched_dep_hour", "act_dep_hour", "dow", 
          "day_of_year", "hour_sin", "hour_cos", "doy_sin", "doy_cos", 
-         "stop_lat", "stop_lon", "transfer_degree", "min_transfer_time",
-         "temperature", "precipitation", "wind_speed"))
+         "stop_lat", "stop_lon", "transfer_degree", "min_transfer_time"))
 
 final_features.createOrReplaceTempView("segment_features")
 feat_with_weather.unpersist()
@@ -1126,7 +1173,7 @@ from pyspark.sql.types     import DoubleType
 # prepare hybrid dataframe
 # join in your baseline quantiles (q50, q75, ecc) that you computed earlier
 data = final_features.join(
-    baseline_qs.select("route_id","bpuic","sched_dep_hour","q50","q75","q90","q95"),
+    broadcast(baseline_qs.select("route_id","bpuic","sched_dep_hour","q50","q75","q90","q95")),
     on=["route_id","bpuic","sched_dep_hour"], how="left").withColumn("resid_label", col("delay") - col("q50"))
 
 
@@ -1135,11 +1182,11 @@ data = final_features.join(
 # hist_ist.count()
 # hist_feat = hist_feat.checkpoint()
 # hist_feat.count()
-final_features = final_features.checkpoint()
-final_features.count()
+# final_features = final_features.checkpoint()
+# final_features.count()
 
 ## We unpersist some RDDs to free up some space here
-final_features.unpersist()
+# final_features.unpersist()
 # hist_feat.unpersist()
 # hist_ist.unpersist()
 
@@ -1151,12 +1198,19 @@ train, valid, test = data.randomSplit([0.7,0.15,0.15], seed=42)
 # sample test, take a small 5% sample of train to verify pipeline
 # train_small = train.sample(fraction=0.05, seed=42)
 
+# feature_cols = [
+#     "scheduled_tt","sched_dep_hour","act_dep_hour",
+#     "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
+#     "stop_lat","stop_lon","transfer_degree","min_transfer_time",
+#     "temperature","precipitation","wind_speed",
+#     "q50"]  # include baseline median
+
 feature_cols = [
     "scheduled_tt","sched_dep_hour","act_dep_hour",
     "dow","day_of_year","hour_sin","hour_cos","doy_sin","doy_cos",
     "stop_lat","stop_lon","transfer_degree","min_transfer_time",
-    "temperature","precipitation","wind_speed",
     "q50"]  # include baseline median
+
 
 assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
 
@@ -1378,7 +1432,7 @@ if TRAINING:
 else:
   print("Skipping testing of best model since TRAINING is false")
 
-# %% vscode={"languageId": "shellscript"}
+# %%
 from hashlib import sha256
 
 # # Saving the best model
@@ -1469,7 +1523,7 @@ print("RandomForest training complete")'''
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
 # # IV. Route Planning Algorithm
-# %% vscode={"languageId": "shellscript"}
+# %%
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -1971,7 +2025,7 @@ def create_journey_planner_ui(planner, stops_df_for_ui): # stops_df_for_ui is Sp
     display(widgets.VBox([input_ui_layout, tabs_output]))
 
 
-# %% vscode={"languageId": "shellscript"}
+# %%
 def implement_robust_journey_planner(graph, stops_df, delay_model=None):
     """
     Implement the robust journey planner.
@@ -1997,7 +2051,7 @@ def implement_robust_journey_planner(graph, stops_df, delay_model=None):
     return planner, ui
 
 
-# %% vscode={"languageId": "shellscript"}
+# %%
 planner, ui = implement_robust_journey_planner(G, stops_lausanne_rt)
 display(ui)
 
